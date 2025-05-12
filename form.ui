@@ -25,7 +25,7 @@
       </property>
       <layout class="QVBoxLayout" name="verticalLayout">
        <item>
-        <widget class="QLabel" name="label">
+        <widget class="QLabel" name="labelCallOffset">
          <property name="text">
           <string>Call (Offset)</string>
          </property>
@@ -81,7 +81,7 @@
          </property>
          <layout class="QVBoxLayout" name="verticalLayout_2">
           <item>
-           <widget class="QLabel" name="label_4">
+           <widget class="QLabel" name="labelDialogue">
             <property name="text">
              <string>Dialogue</string>
             </property>
@@ -91,21 +91,28 @@
            <widget class="QTextEdit" name="textEdit"/>
           </item>
           <item>
-           <widget class="QLabel" name="label_2">
+           <widget class="QLabel" name="labelStartFrame">
             <property name="text">
              <string>Start Frame</string>
             </property>
            </widget>
           </item>
           <item>
-           <widget class="QLabel" name="label_3">
+           <widget class="QLabel" name="labelDuration">
             <property name="text">
              <string>Duration</string>
             </property>
            </widget>
           </item>
           <item>
-           <widget class="QSpinBox" name="spinBox"/>
+           <widget class="QSpinBox" name="spinBox">
+            <property name="maximum">
+             <number>99999999</number>
+            </property>
+            <property name="displayIntegerBase">
+             <number>9</number>
+            </property>
+           </widget>
           </item>
           <item>
            <widget class="QSpinBox" name="spinBox_2"/>
@@ -116,7 +123,7 @@
        <item>
         <widget class="QPushButton" name="quitButton">
          <property name="text">
-          <string>Fill Boxes</string>
+          <string>Quit</string>
          </property>
         </widget>
        </item>
