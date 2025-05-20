@@ -17,18 +17,19 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QConicalGradient,
     QPainter, QPalette, QPixmap, QRadialGradient,
     QTransform)
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsView,
-    QGroupBox, QHBoxLayout, QLabel, QListView,
-    QMainWindow, QMenu, QMenuBar, QPushButton,
-    QSizePolicy, QSpinBox, QStatusBar, QTextEdit,
-    QVBoxLayout, QWidget)
+    QGroupBox, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QMenu, QMenuBar,
+    QPushButton, QSizePolicy, QSpinBox, QStatusBar,
+    QTextEdit, QVBoxLayout, QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(939, 599)
+        MainWindow.resize(1278, 742)
         self.actionLoad_RADIO_DAT = QAction(MainWindow)
         self.actionLoad_RADIO_DAT.setObjectName(u"actionLoad_RADIO_DAT")
+        self.actionLoad_RADIO_DAT.setCheckable(False)
         self.actionLoad_VOX_DAT = QAction(MainWindow)
         self.actionLoad_VOX_DAT.setObjectName(u"actionLoad_VOX_DAT")
         self.actionSave_RADIO_DAT = QAction(MainWindow)
@@ -41,6 +42,16 @@ class Ui_MainWindow(object):
         self.actionPreferences.setObjectName(u"actionPreferences")
         self.actionAbout_Dialogue_Editor = QAction(MainWindow)
         self.actionAbout_Dialogue_Editor.setObjectName(u"actionAbout_Dialogue_Editor")
+        self.actionLoad_Radio_XML = QAction(MainWindow)
+        self.actionLoad_Radio_XML.setObjectName(u"actionLoad_Radio_XML")
+        self.actionAnother_option = QAction(MainWindow)
+        self.actionAnother_option.setObjectName(u"actionAnother_option")
+        self.actionCopy = QAction(MainWindow)
+        self.actionCopy.setObjectName(u"actionCopy")
+        self.actionPasta = QAction(MainWindow)
+        self.actionPasta.setObjectName(u"actionPasta")
+        self.actionHow_to_use = QAction(MainWindow)
+        self.actionHow_to_use.setObjectName(u"actionHow_to_use")
         self.centralwidget = QWidget(MainWindow)
         self.centralwidget.setObjectName(u"centralwidget")
         self.horizontalLayout = QHBoxLayout(self.centralwidget)
@@ -61,10 +72,10 @@ class Ui_MainWindow(object):
 
         self.verticalLayout.addWidget(self.offsetListBox)
 
-        self.listView = QListView(self.frame)
-        self.listView.setObjectName(u"listView")
+        self.audioCueListView = QListWidget(self.frame)
+        self.audioCueListView.setObjectName(u"audioCueListView")
 
-        self.verticalLayout.addWidget(self.listView)
+        self.verticalLayout.addWidget(self.audioCueListView)
 
 
         self.horizontalLayout.addWidget(self.frame)
@@ -113,22 +124,22 @@ class Ui_MainWindow(object):
 
         self.verticalLayout_2.addWidget(self.labelStartFrame)
 
+        self.startFrameBox = QSpinBox(self.groupBox)
+        self.startFrameBox.setObjectName(u"startFrameBox")
+        self.startFrameBox.setMaximum(99999999)
+        self.startFrameBox.setDisplayIntegerBase(9)
+
+        self.verticalLayout_2.addWidget(self.startFrameBox)
+
         self.labelDuration = QLabel(self.groupBox)
         self.labelDuration.setObjectName(u"labelDuration")
 
         self.verticalLayout_2.addWidget(self.labelDuration)
 
-        self.spinBox = QSpinBox(self.groupBox)
-        self.spinBox.setObjectName(u"spinBox")
-        self.spinBox.setMaximum(99999999)
-        self.spinBox.setDisplayIntegerBase(9)
+        self.durationBox = QSpinBox(self.groupBox)
+        self.durationBox.setObjectName(u"durationBox")
 
-        self.verticalLayout_2.addWidget(self.spinBox)
-
-        self.spinBox_2 = QSpinBox(self.groupBox)
-        self.spinBox_2.setObjectName(u"spinBox_2")
-
-        self.verticalLayout_2.addWidget(self.spinBox_2)
+        self.verticalLayout_2.addWidget(self.durationBox)
 
 
         self.verticalLayout_4.addWidget(self.groupBox)
@@ -144,7 +155,8 @@ class Ui_MainWindow(object):
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(MainWindow)
         self.menubar.setObjectName(u"menubar")
-        self.menubar.setGeometry(QRect(0, 0, 939, 24))
+        self.menubar.setGeometry(QRect(0, 0, 1278, 24))
+        self.menubar.setDefaultUp(True)
         self.menuFile = QMenu(self.menubar)
         self.menuFile.setObjectName(u"menuFile")
         self.menuEdit = QMenu(self.menubar)
@@ -157,23 +169,33 @@ class Ui_MainWindow(object):
         MainWindow.setStatusBar(self.statusbar)
 #if QT_CONFIG(shortcut)
         self.labelCallOffset.setBuddy(self.offsetListBox)
+        self.label_5.setBuddy(self.graphicsView)
+        self.labelDialogue.setBuddy(self.textEdit)
+        self.labelStartFrame.setBuddy(self.startFrameBox)
+        self.labelDuration.setBuddy(self.durationBox)
 #endif // QT_CONFIG(shortcut)
 
         self.menubar.addAction(self.menuFile.menuAction())
         self.menubar.addAction(self.menuEdit.menuAction())
         self.menubar.addAction(self.menuHelp.menuAction())
         self.menuFile.addAction(self.actionLoad_RADIO_DAT)
+        self.menuFile.addAction(self.actionLoad_Radio_XML)
         self.menuFile.addAction(self.actionLoad_VOX_DAT)
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.actionSave_RADIO_DAT)
         self.menuFile.addAction(self.actionSave_RADIO_XML)
         self.menuFile.addSeparator()
         self.menuFile.addAction(self.actionQuit)
+        self.menuEdit.addAction(self.actionAnother_option)
         self.menuEdit.addAction(self.actionPreferences)
         self.menuEdit.addSeparator()
+        self.menuEdit.addAction(self.actionCopy)
+        self.menuEdit.addAction(self.actionPasta)
+        self.menuHelp.addAction(self.actionHow_to_use)
         self.menuHelp.addAction(self.actionAbout_Dialogue_Editor)
 
         self.retranslateUi(MainWindow)
+        self.quitButton.clicked.connect(MainWindow.close)
 
         QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
@@ -193,6 +215,14 @@ class Ui_MainWindow(object):
 #endif // QT_CONFIG(shortcut)
         self.actionPreferences.setText(QCoreApplication.translate("MainWindow", u"Preferences", None))
         self.actionAbout_Dialogue_Editor.setText(QCoreApplication.translate("MainWindow", u"About Dialogue Editor...", None))
+        self.actionLoad_Radio_XML.setText(QCoreApplication.translate("MainWindow", u"Load Radio.XML...", None))
+#if QT_CONFIG(shortcut)
+        self.actionLoad_Radio_XML.setShortcut(QCoreApplication.translate("MainWindow", u"Ctrl+L", None))
+#endif // QT_CONFIG(shortcut)
+        self.actionAnother_option.setText(QCoreApplication.translate("MainWindow", u"Another option", None))
+        self.actionCopy.setText(QCoreApplication.translate("MainWindow", u"Copy", None))
+        self.actionPasta.setText(QCoreApplication.translate("MainWindow", u"Pasta", None))
+        self.actionHow_to_use.setText(QCoreApplication.translate("MainWindow", u"How to use", None))
         self.labelCallOffset.setText(QCoreApplication.translate("MainWindow", u"Call (Offset)", None))
         self.label_5.setText(QCoreApplication.translate("MainWindow", u"Preview:", None))
         self.groupBox.setTitle(QCoreApplication.translate("MainWindow", u"Timings", None))
