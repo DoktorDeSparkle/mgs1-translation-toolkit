@@ -17,16 +17,17 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QConicalGradient,
     QPainter, QPalette, QPixmap, QRadialGradient,
     QTransform)
 from PySide6.QtWidgets import (QApplication, QComboBox, QFrame, QGraphicsView,
-    QGroupBox, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QMainWindow, QMenu, QMenuBar,
-    QPushButton, QSizePolicy, QSpinBox, QStatusBar,
-    QTextEdit, QVBoxLayout, QWidget)
+    QGroupBox, QHBoxLayout, QLCDNumber, QLabel,
+    QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+    QMenu, QMenuBar, QPushButton, QSizePolicy,
+    QSpinBox, QStatusBar, QTextEdit, QVBoxLayout,
+    QWidget)
 
 class Ui_MainWindow(object):
     def setupUi(self, MainWindow):
         if not MainWindow.objectName():
             MainWindow.setObjectName(u"MainWindow")
-        MainWindow.resize(1278, 742)
+        MainWindow.resize(1189, 821)
         self.actionLoad_RADIO_DAT = QAction(MainWindow)
         self.actionLoad_RADIO_DAT.setObjectName(u"actionLoad_RADIO_DAT")
         self.actionLoad_RADIO_DAT.setCheckable(False)
@@ -72,10 +73,78 @@ class Ui_MainWindow(object):
 
         self.verticalLayout.addWidget(self.offsetListBox)
 
+        self.StatusBar = QFrame(self.frame)
+        self.StatusBar.setObjectName(u"StatusBar")
+        self.StatusBar.setFrameShape(QFrame.Shape.StyledPanel)
+        self.StatusBar.setFrameShadow(QFrame.Shadow.Raised)
+        self.horizontalLayout_2 = QHBoxLayout(self.StatusBar)
+        self.horizontalLayout_2.setObjectName(u"horizontalLayout_2")
+        self.FreqLabel = QLabel(self.StatusBar)
+        self.FreqLabel.setObjectName(u"FreqLabel")
+        self.FreqLabel.setEnabled(True)
+
+        self.horizontalLayout_2.addWidget(self.FreqLabel)
+
+        self.FreqDisplay = QLCDNumber(self.StatusBar)
+        self.FreqDisplay.setObjectName(u"FreqDisplay")
+        self.FreqDisplay.setEnabled(True)
+        palette = QPalette()
+        brush = QBrush(QColor(0, 255, 58, 217))
+        brush.setStyle(Qt.BrushStyle.SolidPattern)
+        palette.setBrush(QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText, brush)
+        palette.setBrush(QPalette.ColorGroup.Inactive, QPalette.ColorRole.WindowText, brush)
+        self.FreqDisplay.setPalette(palette)
+        self.FreqDisplay.setAutoFillBackground(True)
+        self.FreqDisplay.setFrameShape(QFrame.Shape.NoFrame)
+        self.FreqDisplay.setFrameShadow(QFrame.Shadow.Plain)
+        self.FreqDisplay.setLineWidth(1)
+        self.FreqDisplay.setMidLineWidth(0)
+        self.FreqDisplay.setSmallDecimalPoint(True)
+        self.FreqDisplay.setDigitCount(6)
+        self.FreqDisplay.setMode(QLCDNumber.Mode.Dec)
+        self.FreqDisplay.setSegmentStyle(QLCDNumber.SegmentStyle.Flat)
+        self.FreqDisplay.setProperty(u"value", 140.849999999999994)
+
+        self.horizontalLayout_2.addWidget(self.FreqDisplay)
+
+        self.pushButton = QPushButton(self.StatusBar)
+        self.pushButton.setObjectName(u"pushButton")
+
+        self.horizontalLayout_2.addWidget(self.pushButton)
+
+        self.VoxBlockAddressLabel = QLabel(self.StatusBar)
+        self.VoxBlockAddressLabel.setObjectName(u"VoxBlockAddressLabel")
+
+        self.horizontalLayout_2.addWidget(self.VoxBlockAddressLabel)
+
+        self.VoxBlockAddressDisplay = QLineEdit(self.StatusBar)
+        self.VoxBlockAddressDisplay.setObjectName(u"VoxBlockAddressDisplay")
+
+        self.horizontalLayout_2.addWidget(self.VoxBlockAddressDisplay)
+
+        self.VoxAddressLabel = QLabel(self.StatusBar)
+        self.VoxAddressLabel.setObjectName(u"VoxAddressLabel")
+
+        self.horizontalLayout_2.addWidget(self.VoxAddressLabel)
+
+        self.VoxAddressDisplay = QLineEdit(self.StatusBar)
+        self.VoxAddressDisplay.setObjectName(u"VoxAddressDisplay")
+        self.VoxAddressDisplay.setReadOnly(True)
+
+        self.horizontalLayout_2.addWidget(self.VoxAddressDisplay)
+
+
+        self.verticalLayout.addWidget(self.StatusBar)
+
         self.audioCueListView = QListWidget(self.frame)
         self.audioCueListView.setObjectName(u"audioCueListView")
 
         self.verticalLayout.addWidget(self.audioCueListView)
+
+        self.subsPreviewList = QListWidget(self.frame)
+        self.subsPreviewList.setObjectName(u"subsPreviewList")
+
+        self.verticalLayout.addWidget(self.subsPreviewList)
 
 
         self.horizontalLayout.addWidget(self.frame)
@@ -92,13 +161,14 @@ class Ui_MainWindow(object):
         self.previewFrame.setFrameShadow(QFrame.Shadow.Raised)
         self.verticalLayout_3 = QVBoxLayout(self.previewFrame)
         self.verticalLayout_3.setObjectName(u"verticalLayout_3")
-        self.label_5 = QLabel(self.previewFrame)
-        self.label_5.setObjectName(u"label_5")
+        self.previewLabel = QLabel(self.previewFrame)
+        self.previewLabel.setObjectName(u"previewLabel")
 
-        self.verticalLayout_3.addWidget(self.label_5)
+        self.verticalLayout_3.addWidget(self.previewLabel)
 
         self.graphicsView = QGraphicsView(self.previewFrame)
         self.graphicsView.setObjectName(u"graphicsView")
+        self.graphicsView.setInteractive(False)
 
         self.verticalLayout_3.addWidget(self.graphicsView)
 
@@ -114,10 +184,10 @@ class Ui_MainWindow(object):
 
         self.verticalLayout_2.addWidget(self.labelDialogue)
 
-        self.textEdit = QTextEdit(self.groupBox)
-        self.textEdit.setObjectName(u"textEdit")
+        self.DialogueEditorBox = QTextEdit(self.groupBox)
+        self.DialogueEditorBox.setObjectName(u"DialogueEditorBox")
 
-        self.verticalLayout_2.addWidget(self.textEdit)
+        self.verticalLayout_2.addWidget(self.DialogueEditorBox)
 
         self.labelStartFrame = QLabel(self.groupBox)
         self.labelStartFrame.setObjectName(u"labelStartFrame")
@@ -155,7 +225,7 @@ class Ui_MainWindow(object):
         MainWindow.setCentralWidget(self.centralwidget)
         self.menubar = QMenuBar(MainWindow)
         self.menubar.setObjectName(u"menubar")
-        self.menubar.setGeometry(QRect(0, 0, 1278, 24))
+        self.menubar.setGeometry(QRect(0, 0, 1189, 24))
         self.menubar.setDefaultUp(True)
         self.menuFile = QMenu(self.menubar)
         self.menuFile.setObjectName(u"menuFile")
@@ -169,8 +239,8 @@ class Ui_MainWindow(object):
         MainWindow.setStatusBar(self.statusbar)
 #if QT_CONFIG(shortcut)
         self.labelCallOffset.setBuddy(self.offsetListBox)
-        self.label_5.setBuddy(self.graphicsView)
-        self.labelDialogue.setBuddy(self.textEdit)
+        self.previewLabel.setBuddy(self.graphicsView)
+        self.labelDialogue.setBuddy(self.DialogueEditorBox)
         self.labelStartFrame.setBuddy(self.startFrameBox)
         self.labelDuration.setBuddy(self.durationBox)
 #endif // QT_CONFIG(shortcut)
@@ -196,6 +266,7 @@ class Ui_MainWindow(object):
 
         self.retranslateUi(MainWindow)
         self.quitButton.clicked.connect(MainWindow.close)
+        self.actionQuit.triggered.connect(MainWindow.close)
 
         QMetaObject.connectSlotsByName(MainWindow)
     # setupUi
@@ -224,7 +295,11 @@ class Ui_MainWindow(object):
         self.actionPasta.setText(QCoreApplication.translate("MainWindow", u"Pasta", None))
         self.actionHow_to_use.setText(QCoreApplication.translate("MainWindow", u"How to use", None))
         self.labelCallOffset.setText(QCoreApplication.translate("MainWindow", u"Call (Offset)", None))
-        self.label_5.setText(QCoreApplication.translate("MainWindow", u"Preview:", None))
+        self.FreqLabel.setText(QCoreApplication.translate("MainWindow", u"Frequency:", None))
+        self.pushButton.setText(QCoreApplication.translate("MainWindow", u"Play Audio", None))
+        self.VoxBlockAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Block:", None))
+        self.VoxAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Address:", None))
+        self.previewLabel.setText(QCoreApplication.translate("MainWindow", u"Preview:", None))
         self.groupBox.setTitle(QCoreApplication.translate("MainWindow", u"Timings", None))
         self.labelDialogue.setText(QCoreApplication.translate("MainWindow", u"Dialogue", None))
         self.labelStartFrame.setText(QCoreApplication.translate("MainWindow", u"Start Frame", None))

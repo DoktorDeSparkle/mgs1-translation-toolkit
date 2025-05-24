@@ -60,6 +60,9 @@ class MainWindow(QMainWindow):
 
         # Offset Selector:
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
+        self.ui.offsetListBox.setStatusTip("Select a call offset to edit")
+        self.ui.audioCueListView.currentItemChanged.connect(self.selectAudioCue)
+        self.ui.subsPreviewList.currentItemChanged.connect(self.subtitleSelect)
 
     def loadRadioDatFile(self): # Loads the radio file from DAT
         """
@@ -110,12 +113,56 @@ class MainWindow(QMainWindow):
             return
         print(f"Selected offset: {offset}")
         radioManager.setWorkingCall(offset)
+
+        # Update the frequency display for the current call
+        self.ui.FreqDisplay.display(radioManager.workingCall.get("freq"))
+        # Reset toolbar
+        self.ui.VoxAddressDisplay.setText("") 
+        self.ui.VoxBlockAddressDisplay.setText("")
+
         # Not sure yet how to reset the list.
         self.ui.audioCueListView.clear()
         # Add the audio cues to the list view
         for audio in radioManager.getVoxOffsets():
             QListWidgetItem(audio, self.ui.audioCueListView)
 
+    def selectAudioCue(self, item):
+        """
+        This function is called when the user selects an audio cue from the list.
+        It sets the working audio cue in the radio manager to the selected offset.
+        """
+        offset = self.ui.audioCueListView.currentItem().text()
+        print(f"Selected audio cue: {offset}")
+        if offset is None:
+            print("No item selected.")
+            return
+        else:
+            radioManager.setWorkingVox(offset)
+            self.ui.subsPreviewList.clear()
+            # Get and display the offset of the VOX file
+            voxOffset = radioManager.workingVox.get("content")[8:16]
+            offsetBlock = bytes.fromhex(voxOffset)
+            self.ui.VoxAddressDisplay.setText(str(int.from_bytes(offsetBlock, byteorder="big") * 0x800)) # Currently no vox offset value, grab it from raw hex
+            self.ui.VoxBlockAddressDisplay.setText("0x" + voxOffset) # Currently no vox offset value, grab it from raw hex
+            # Update subtitles in the display
+            for text in radioManager.getSubs():
+                QListWidgetItem(text, self.ui.subsPreviewList)
+            for i, sub in enumerate(radioManager.getSubs()):
+                item = QListWidgetItem(sub, self.ui.subsColumnList)
+                item.setData(i, sub)
+                
+    def subtitleSelect(self, item):
+        """
+        This function is called when the user selects a subtitle from the list.
+        It sets the working subtitle in the radio manager to the selected offset.
+        """
+        if item is None:
+            print("No item selected.")
+            return
+        item = self.ui.subsPreviewList.currentRow()
+        print(f"Selected subtitle: {item}")
+        self.ui.DialogueEditorBox.setText(radioManager.getSubs()[item].replace("\\r\\n", "\n"))
+        
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
