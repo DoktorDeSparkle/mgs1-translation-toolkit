@@ -107,16 +107,11 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout_2.addWidget(self.FreqDisplay)
 
-        self.VoxAddressLabel = QLabel(self.StatusBar)
-        self.VoxAddressLabel.setObjectName(u"VoxAddressLabel")
+        self.playVoxButton = QPushButton(self.StatusBar)
+        self.playVoxButton.setObjectName(u"playVoxButton")
+        self.playVoxButton.setEnabled(False)
 
-        self.horizontalLayout_2.addWidget(self.VoxAddressLabel)
-
-        self.VoxAddressDisplay = QLineEdit(self.StatusBar)
-        self.VoxAddressDisplay.setObjectName(u"VoxAddressDisplay")
-        self.VoxAddressDisplay.setReadOnly(True)
-
-        self.horizontalLayout_2.addWidget(self.VoxAddressDisplay)
+        self.horizontalLayout_2.addWidget(self.playVoxButton)
 
         self.VoxBlockAddressLabel = QLabel(self.StatusBar)
         self.VoxBlockAddressLabel.setObjectName(u"VoxBlockAddressLabel")
@@ -127,6 +122,17 @@ class Ui_MainWindow(object):
         self.VoxBlockAddressDisplay.setObjectName(u"VoxBlockAddressDisplay")
 
         self.horizontalLayout_2.addWidget(self.VoxBlockAddressDisplay)
+
+        self.VoxAddressLabel = QLabel(self.StatusBar)
+        self.VoxAddressLabel.setObjectName(u"VoxAddressLabel")
+
+        self.horizontalLayout_2.addWidget(self.VoxAddressLabel)
+
+        self.VoxAddressDisplay = QLineEdit(self.StatusBar)
+        self.VoxAddressDisplay.setObjectName(u"VoxAddressDisplay")
+        self.VoxAddressDisplay.setReadOnly(True)
+
+        self.horizontalLayout_2.addWidget(self.VoxAddressDisplay)
 
 
         self.verticalLayout.addWidget(self.StatusBar)
@@ -273,6 +279,9 @@ class Ui_MainWindow(object):
         self.actionLoad_RADIO_DAT.setShortcut(QCoreApplication.translate("MainWindow", u"Ctrl+O", None))
 #endif // QT_CONFIG(shortcut)
         self.actionLoad_VOX_DAT.setText(QCoreApplication.translate("MainWindow", u"Load VOX.DAT...", None))
+#if QT_CONFIG(shortcut)
+        self.actionLoad_VOX_DAT.setShortcut(QCoreApplication.translate("MainWindow", u"Ctrl+K", None))
+#endif // QT_CONFIG(shortcut)
         self.actionSave_RADIO_DAT.setText(QCoreApplication.translate("MainWindow", u"Save RADIO.DAT", None))
         self.actionSave_RADIO_XML.setText(QCoreApplication.translate("MainWindow", u"Save RADIO.XML", None))
         self.actionQuit.setText(QCoreApplication.translate("MainWindow", u"Quit", None))
@@ -291,8 +300,9 @@ class Ui_MainWindow(object):
         self.actionHow_to_use.setText(QCoreApplication.translate("MainWindow", u"How to use", None))
         self.labelCallOffset.setText(QCoreApplication.translate("MainWindow", u"Call (Offset)", None))
         self.FreqLabel.setText(QCoreApplication.translate("MainWindow", u"Frequency:", None))
-        self.VoxAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Address:", None))
+        self.playVoxButton.setText(QCoreApplication.translate("MainWindow", u"Play Audio", None))
         self.VoxBlockAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Block:", None))
+        self.VoxAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Address:", None))
         self.previewLabel.setText(QCoreApplication.translate("MainWindow", u"Preview:", None))
         self.groupBox.setTitle(QCoreApplication.translate("MainWindow", u"Timings", None))
         self.labelDialogue.setText(QCoreApplication.translate("MainWindow", u"Dialogue", None))

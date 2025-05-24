@@ -107,10 +107,11 @@ class Ui_MainWindow(object):
 
         self.horizontalLayout_2.addWidget(self.FreqDisplay)
 
-        self.pushButton = QPushButton(self.StatusBar)
-        self.pushButton.setObjectName(u"pushButton")
+        self.playVoxButton = QPushButton(self.StatusBar)
+        self.playVoxButton.setObjectName(u"playVoxButton")
+        self.playVoxButton.setEnabled(False)
 
-        self.horizontalLayout_2.addWidget(self.pushButton)
+        self.horizontalLayout_2.addWidget(self.playVoxButton)
 
         self.VoxBlockAddressLabel = QLabel(self.StatusBar)
         self.VoxBlockAddressLabel.setObjectName(u"VoxBlockAddressLabel")
@@ -278,6 +279,9 @@ class Ui_MainWindow(object):
         self.actionLoad_RADIO_DAT.setShortcut(QCoreApplication.translate("MainWindow", u"Ctrl+O", None))
 #endif // QT_CONFIG(shortcut)
         self.actionLoad_VOX_DAT.setText(QCoreApplication.translate("MainWindow", u"Load VOX.DAT...", None))
+#if QT_CONFIG(shortcut)
+        self.actionLoad_VOX_DAT.setShortcut(QCoreApplication.translate("MainWindow", u"Ctrl+K", None))
+#endif // QT_CONFIG(shortcut)
         self.actionSave_RADIO_DAT.setText(QCoreApplication.translate("MainWindow", u"Save RADIO.DAT", None))
         self.actionSave_RADIO_XML.setText(QCoreApplication.translate("MainWindow", u"Save RADIO.XML", None))
         self.actionQuit.setText(QCoreApplication.translate("MainWindow", u"Quit", None))
@@ -296,7 +300,7 @@ class Ui_MainWindow(object):
         self.actionHow_to_use.setText(QCoreApplication.translate("MainWindow", u"How to use", None))
         self.labelCallOffset.setText(QCoreApplication.translate("MainWindow", u"Call (Offset)", None))
         self.FreqLabel.setText(QCoreApplication.translate("MainWindow", u"Frequency:", None))
-        self.pushButton.setText(QCoreApplication.translate("MainWindow", u"Play Audio", None))
+        self.playVoxButton.setText(QCoreApplication.translate("MainWindow", u"Play Audio", None))
         self.VoxBlockAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Block:", None))
         self.VoxAddressLabel.setText(QCoreApplication.translate("MainWindow", u"Vox Address:", None))
         self.previewLabel.setText(QCoreApplication.translate("MainWindow", u"Preview:", None))

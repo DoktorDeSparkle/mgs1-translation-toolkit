@@ -121,7 +121,10 @@
            </widget>
           </item>
           <item>
-           <widget class="QPushButton" name="pushButton">
+           <widget class="QPushButton" name="playVoxButton">
+            <property name="enabled">
+             <bool>false</bool>
+            </property>
             <property name="text">
              <string>Play Audio</string>
             </property>
@@ -329,6 +332,9 @@
   <action name="actionLoad_VOX_DAT">
    <property name="text">
     <string>Load VOX.DAT...</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+K</string>
    </property>
   </action>
   <action name="actionSave_RADIO_DAT">

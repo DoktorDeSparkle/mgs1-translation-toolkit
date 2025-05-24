@@ -15,11 +15,15 @@ sys.path.insert(0, submodule_path)  # Insert at the beginning to prioritize
 
 # MGS Script modules
 from scripts.radioModule import radioDataEditor as RDE
+from scripts import demoClasses as voxCtl
+from scripts import demoManager as DM
 # Hold off on vox/demo
 # from scripts import demoManager 
 
 # Initialkize Radio Data Editor
 radioManager = RDE()
+voxManager: dict [str, voxCtl.demo] = {}
+import scripts.audioTools.vagAudioTools as VAG
 
 class XmlFileDialog(QFileDialog):
     """
@@ -54,6 +58,8 @@ class MainWindow(QMainWindow):
         # Loading XML File
         self.ui.actionLoad_Radio_XML.triggered.connect(self.loadRadioXMLFile)
         self.ui.actionLoad_Radio_XML.setStatusTip("Load a RADIO.XML file")
+        # Loading the VOX data
+        self.ui.actionLoad_VOX_DAT.triggered.connect(self.loadVoxData)
         # Saving 
         self.ui.actionSave_RADIO_DAT.triggered.connect(self.saveRadioDatFile)
         self.ui.actionSave_RADIO_DAT.setStatusTip("Save a RADIO.DAT file to XML format")
@@ -63,6 +69,26 @@ class MainWindow(QMainWindow):
         self.ui.offsetListBox.setStatusTip("Select a call offset to edit")
         self.ui.audioCueListView.currentItemChanged.connect(self.selectAudioCue)
         self.ui.subsPreviewList.currentItemChanged.connect(self.subtitleSelect)
+
+        # Setting up Buttons
+        self.ui.playVoxButton.clicked.connect(self.playVoxFile)
+    
+    def openFileDialog(self, fileTypes: str) -> str:
+        # open dialog box
+        dialog = XmlFileDialog(self)
+        dialog.setNameFilter(fileTypes)
+        if dialog.exec_() == QFileDialog.Accepted:
+            selected_files = dialog.selectedFiles()
+            if selected_files:
+                filename = selected_files[0]
+                print(f"Selected file: {filename}")
+                return filename 
+                # Load the radio file
+                # self.loadRadioFile(filename)
+            else:
+                print("No file selected.")
+        else:
+            print("Dialog canceled.")
 
     def loadRadioDatFile(self): # Loads the radio file from DAT
         """
@@ -95,10 +121,29 @@ class MainWindow(QMainWindow):
             self.ui.offsetListBox.addItem(offset, userData=offset)
         print("Not implemented yet")
         pass
+    
+    def loadVoxData(self):
+        global voxManager
+        voxFile = self.openFileDialog(fileTypes="DAT Files (*.DAT)")
+        voxData = open(voxFile, 'rb').read()
+        voxManager = DM.parseDemoFile(voxData)
+        self.ui.playVoxButton.setEnabled(True)
 
     def saveRadioDatFile(self): # Saves the radio file to XML
         print("Not implemented yet")
         pass
+
+    def playVoxFile(self):
+        global voxManager
+        voxOffset = self.ui.VoxAddressDisplay.text()
+        if len(voxOffset) == 0:
+            pass
+        else:
+            voxData = voxManager.get(str(voxOffset))
+            vagFile = voxCtl.outputVagFile(voxData, "tempVag", "/tmp")
+            VAG.playVagFile(vagFile)
+            
+        
 
     def selectCallOffset(self, index):
         """
