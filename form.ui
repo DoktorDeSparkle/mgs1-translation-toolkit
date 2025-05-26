@@ -128,6 +128,9 @@
             <property name="text">
              <string>Play Audio</string>
             </property>
+            <property name="shortcut">
+             <string>Ctrl+P</string>
+            </property>
            </widget>
           </item>
           <item>

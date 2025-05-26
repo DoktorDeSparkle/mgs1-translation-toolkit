@@ -181,6 +181,7 @@ class MainWindow(QMainWindow):
         # Add the audio cues to the list view
         for audio in radioManager.getVoxOffsets():
             QListWidgetItem(audio, self.ui.audioCueListView)
+        self.ui.audioCueListView.selectionChanged
 
     def selectAudioCue(self, item):
         """
