@@ -2,6 +2,7 @@
 import sys, os
 
 from PySide6.QtWidgets import QApplication, QMainWindow, QFileDialog, QListWidgetItem
+from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton
 
 # Important:
 # You need to run the following command to generate the ui_form.py file
@@ -38,6 +39,29 @@ class XmlFileDialog(QFileDialog):
         self.setModal(True)
         self.setWindowTitle("Select a Radio.xml File")
         self.setDirectory(os.getcwd())
+
+
+class NotificationDialog(QDialog):
+    def __init__(self, title="Notification", message="", parent=None):
+        super(NotificationDialog, self).__init__(parent)
+        
+        # Set the window title
+        self.setWindowTitle(title)
+        
+        # Create a vertical layout for the dialog
+        layout = QVBoxLayout()
+        
+        # Add a label with the notification message
+        label = QLabel(message)
+        layout.addWidget(label)
+        
+        # Add an OK button to close the dialog
+        ok_button = QPushButton("OK")
+        ok_button.clicked.connect(self.accept)  # Close the dialog when clicked
+        layout.addWidget(ok_button)
+        
+        # Set the layout on the dialog
+        self.setLayout(layout)
 
 class MainWindow(QMainWindow):
     """
@@ -100,29 +124,14 @@ class MainWindow(QMainWindow):
     
     def loadRadioXMLFile(self): # Loads the radio file from DAT
         # open dialog box
-        dialog = XmlFileDialog(self)
-        if dialog.exec_() == QFileDialog.Accepted:
-            selected_files = dialog.selectedFiles()
-            if selected_files:
-                filename = selected_files[0]
-                print(f"Selected file: {filename}")
-                # Load the radio file
-                # self.loadRadioFile(filename)
-            else:
-                print("No file selected.")
-        else:
-            print("Dialog canceled.")
-            return
-        # Clear existing entries, then load offsets from file
-        self.ui.offsetListBox.clear()
+        filename = self.openFileDialog("XML Files (*.xml)")
 
         radioManager.loadRadioXmlFile(filename)
         for offset in radioManager.getCallOffsets():
             self.ui.offsetListBox.addItem(offset, userData=offset)
         print("Not implemented yet")
-        pass
     
-    def loadVoxData(self):
+    def loadVoxData(self): # 
         global voxManager
         voxFile = self.openFileDialog(fileTypes="DAT Files (*.DAT)")
         voxData = open(voxFile, 'rb').read()
@@ -136,15 +145,17 @@ class MainWindow(QMainWindow):
     def playVoxFile(self):
         global voxManager
         voxOffset = self.ui.VoxAddressDisplay.text()
+        print(f"Offset: {voxOffset}, {type(voxOffset)}")
         if len(voxOffset) == 0:
             pass
+        elif voxOffset == "0":
+            warning = NotificationDialog("Warning!", "No Vox Offset! This conversation may be on the other disc.", self)
+            warning.exec()
         else:
             voxData = voxManager.get(str(voxOffset))
             vagFile = voxCtl.outputVagFile(voxData, "tempVag", "/tmp")
             VAG.playVagFile(vagFile)
-            
         
-
     def selectCallOffset(self, index):
         """
         This function is called when the user selects an offset from the list.
@@ -192,9 +203,10 @@ class MainWindow(QMainWindow):
             # Update subtitles in the display
             for text in radioManager.getSubs():
                 QListWidgetItem(text, self.ui.subsPreviewList)
-            for i, sub in enumerate(radioManager.getSubs()):
-                item = QListWidgetItem(sub, self.ui.subsColumnList)
-                item.setData(i, sub)
+            # I think this is doubling the text appearance
+            # for i, sub in enumerate(radioManager.getSubs()):
+            #     item = QListWidgetItem(sub, self.ui.subsPreviewList )
+            #     item.setData(i, sub)
                 
     def subtitleSelect(self, item):
         """
