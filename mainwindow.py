@@ -30,6 +30,14 @@ currentSubIndex: int = -1
 # Track the current vox offset string so we can look up timings
 currentVoxOffset: str = ""
 
+# Demo mode state
+demoManager: dict[str, voxCtl.demo] = {}
+demoOriginalData: bytes = b''
+demoFilePath: str = ""
+currentDemoKey: str = ""       # sequential name, e.g. "demo-01"
+demoDialogueJson: dict = {}    # {"demo-01": {"1234": {"duration": "...", "text": "..."}}}
+demoSeqToOffset: dict = {}     # {"demo-01": "12345"} — maps name → raw offset string
+
 
 class VoxConversionThread(QThread):
     """
@@ -87,6 +95,9 @@ class MainWindow(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
+        # Editor mode: "radio" or "demo"
+        self._editorMode = "radio"
+
         # ── File Menu ────────────────────────────────────────────────────────
         self.ui.actionLoad_RADIO_DAT.triggered.connect(self.loadRadioDatFile)
         self.ui.actionLoad_RADIO_DAT.setStatusTip("Load a RADIO.DAT file")
@@ -109,12 +120,30 @@ class MainWindow(QMainWindow):
         # ── Edit buttons (added programmatically) ────────────────────────────
         self._addEditButtons()
 
-        # ── Add Save VOX.DAT to File menu (not in generated form) ─────────────
+        # ── Add Save/Load VOX and DEMO actions (not in generated form) ────────
         from PySide6.QtGui import QAction
         self.actionSave_VOX_DAT = QAction("Save VOX.DAT", self)
         self.actionSave_VOX_DAT.setStatusTip("Write timing edits back to VOX.DAT")
         self.actionSave_VOX_DAT.triggered.connect(self.saveVoxDatFile)
         self.ui.menuFile.insertAction(self.ui.actionSave_RADIO_XML, self.actionSave_VOX_DAT)
+
+        self.actionLoad_DEMO_DAT = QAction("Load DEMO.DAT...", self)
+        self.actionLoad_DEMO_DAT.setStatusTip("Load a DEMO.DAT file for demo editing")
+        self.actionLoad_DEMO_DAT.triggered.connect(self.loadDemoData)
+        self.ui.menuFile.insertAction(self.ui.actionLoad_VOX_DAT, self.actionLoad_DEMO_DAT)
+
+        self.actionSave_DEMO_DAT = QAction("Save DEMO.DAT", self)
+        self.actionSave_DEMO_DAT.setStatusTip("Write demo subtitle/timing edits back to DEMO.DAT")
+        self.actionSave_DEMO_DAT.triggered.connect(self.saveDemoDatFile)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionSave_DEMO_DAT)
+
+        # ── View menu (mode toggle) ───────────────────────────────────────────
+        viewMenu = self.menuBar().addMenu("View")
+        self.actionDemoMode = QAction("Demo Editor Mode", self)
+        self.actionDemoMode.setCheckable(True)
+        self.actionDemoMode.setStatusTip("Toggle between Radio and Demo editing modes")
+        self.actionDemoMode.triggered.connect(self._onDemoModeToggled)
+        viewMenu.addAction(self.actionDemoMode)
 
         # Internal flag to suppress spinbox signals while loading data
         self._loadingSubtitle = False
@@ -290,6 +319,13 @@ class MainWindow(QMainWindow):
     # ── Navigation handlers ───────────────────────────────────────────────────
 
     def selectCallOffset(self, index):
+        """Route to the appropriate handler depending on the current editor mode."""
+        if self._editorMode == "demo":
+            self._selectDemo(index)
+        else:
+            self._selectRadioCall(index)
+
+    def _selectRadioCall(self, index):
         global currentSubIndex, currentVoxOffset
         if index == -1:
             return
@@ -309,6 +345,21 @@ class MainWindow(QMainWindow):
             QListWidgetItem(audio, self.ui.audioCueListView)
 
         self._clearEditor()
+
+    def _selectDemo(self, index):
+        global currentDemoKey, currentSubIndex
+        if index == -1:
+            return
+        key = self.ui.offsetListBox.currentData()
+        if key is None:
+            return
+        currentDemoKey = key
+        currentSubIndex = -1
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+        for sub in self._getDemoSubtitleLines():
+            text = sub.text.replace('\x00', '') or f"[Frame {sub.startFrame}]"
+            QListWidgetItem(text, self.ui.subsPreviewList)
 
     def selectAudioCue(self, item):
         global currentSubIndex, currentVoxOffset
@@ -344,22 +395,35 @@ class MainWindow(QMainWindow):
 
         self._loadingSubtitle = True
 
-        # Populate text editor
-        subs = radioManager.getSubs()
-        text = subs[idx].replace("\\r\\n", "\n")
-        self.ui.DialogueEditorBox.setText(text)
+        if self._editorMode == "demo":
+            lines = self._getDemoSubtitleLines()
+            if idx < len(lines):
+                sub = lines[idx]
+                self.ui.DialogueEditorBox.setText(sub.text.replace('\x00', ''))
+                self.ui.startFrameBox.setValue(sub.startFrame)
+                self.ui.durationBox.setValue(sub.displayFrames)
+            else:
+                self.ui.DialogueEditorBox.clear()
+                self.ui.startFrameBox.setValue(0)
+                self.ui.durationBox.setValue(0)
+        else:
+            # Populate text editor
+            subs = radioManager.getSubs()
+            text = subs[idx].replace("\\r\\n", "\n")
+            self.ui.DialogueEditorBox.setText(text)
 
-        # Populate timing from VOX if loaded
-        timing_loaded = self._loadTimingFromVox(idx)
-        if not timing_loaded:
-            self.ui.startFrameBox.setValue(0)
-            self.ui.durationBox.setValue(0)
+            # Populate timing from VOX if loaded
+            timing_loaded = self._loadTimingFromVox(idx)
+            if not timing_loaded:
+                self.ui.startFrameBox.setValue(0)
+                self.ui.durationBox.setValue(0)
 
         self._loadingSubtitle = False
 
         self.applyEditButton.setEnabled(True)
-        self.splitSubButton.setEnabled(True)
-        self.deleteSubButton.setEnabled(True)
+        # Split/Delete only supported in radio mode for now
+        self.splitSubButton.setEnabled(self._editorMode == "radio")
+        self.deleteSubButton.setEnabled(self._editorMode == "radio")
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
 
@@ -400,6 +464,18 @@ class MainWindow(QMainWindow):
         """Write text editor content + spinbox timings back to the in-memory data."""
         global currentSubIndex
         if currentSubIndex < 0:
+            return
+
+        if self._editorMode == "demo":
+            lines = self._getDemoSubtitleLines()
+            if currentSubIndex < len(lines):
+                sub = lines[currentSubIndex]
+                sub.text = self.ui.DialogueEditorBox.toPlainText()
+                sub.startFrame = self.ui.startFrameBox.value()
+                sub.displayFrames = self.ui.durationBox.value()
+            self._refreshSubsList()
+            self.applyEditButton.setStyleSheet("")
+            self.statusBar().showMessage("Changes applied (unsaved — use File → Save DEMO.DAT)", 5000)
             return
 
         # --- Text → XML -------------------------------------------------------
@@ -512,10 +588,15 @@ class MainWindow(QMainWindow):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _refreshSubsList(self):
-        """Rebuild the subtitle list widget from the current working VOX_CUES."""
+        """Rebuild the subtitle list widget from the current data source."""
         self.ui.subsPreviewList.clear()
-        for text in radioManager.getSubs():
-            QListWidgetItem(text, self.ui.subsPreviewList)
+        if self._editorMode == "demo":
+            for sub in self._getDemoSubtitleLines():
+                text = sub.text.replace('\x00', '') or f"[Frame {sub.startFrame}]"
+                QListWidgetItem(text, self.ui.subsPreviewList)
+        else:
+            for text in radioManager.getSubs():
+                QListWidgetItem(text, self.ui.subsPreviewList)
 
     def _clearEditor(self):
         """Reset the editor panel."""
@@ -532,18 +613,27 @@ class MainWindow(QMainWindow):
     # ── Audio ─────────────────────────────────────────────────────────────────
 
     def playVoxFile(self):
-        voxOffset = self.ui.VoxAddressDisplay.text()
-        if not voxOffset:
-            return
-        if voxOffset == "0":
-            NotificationDialog(
-                "Warning!", "No Vox Offset — this call may be on the other disc.", self
-            ).exec()
-            return
-        demo = voxManager.get(str(voxOffset))
-        if demo is None:
-            self.statusBar().showMessage(f"VOX clip not found at offset {voxOffset}", 3000)
-            return
+        if self._editorMode == "demo":
+            if not currentDemoKey or not demoManager:
+                self.statusBar().showMessage("No demo entry selected.", 3000)
+                return
+            demo = demoManager.get(currentDemoKey)
+            if demo is None:
+                self.statusBar().showMessage(f"Demo entry not found: {currentDemoKey}", 3000)
+                return
+        else:
+            voxOffset = self.ui.VoxAddressDisplay.text()
+            if not voxOffset:
+                return
+            if voxOffset == "0":
+                NotificationDialog(
+                    "Warning!", "No Vox Offset — this call may be on the other disc.", self
+                ).exec()
+                return
+            demo = voxManager.get(str(voxOffset))
+            if demo is None:
+                self.statusBar().showMessage(f"VOX clip not found at offset {voxOffset}", 3000)
+                return
 
         # Stop any in-progress conversion or playback
         self.stopVoxFile()
@@ -584,8 +674,139 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Audio error: {msg}", 5000)
 
     def _resetPlaybackButtons(self):
-        self.ui.playVoxButton.setEnabled(bool(voxManager))
+        self.ui.playVoxButton.setEnabled(bool(voxManager) or bool(demoManager))
         self.stopVoxButton.setEnabled(False)
+
+
+    # ── Demo mode ─────────────────────────────────────────────────────────────
+
+    def loadDemoData(self):
+        global demoManager, demoOriginalData, demoFilePath
+        global demoDialogueJson, demoSeqToOffset
+        demoFile = self.openFileDialog("DAT Files (*.DAT *.dat)", "Load DEMO.DAT")
+        if not demoFile:
+            return
+        demoOriginalData = open(demoFile, 'rb').read()
+        demoFilePath = demoFile
+        demoManager = DM.parseDemoFile(demoOriginalData)
+
+        # Extract dialogue JSON directly from the file (no pre-splitting needed)
+        try:
+            from DemoTools.extractDemoVox import extractFromFile
+            demoDialogueJson = extractFromFile(demoFile, fileType="demo")
+        except Exception as e:
+            print(f"Warning: dialogue extraction failed: {e}")
+            demoDialogueJson = {}
+
+        # Map sequential "demo-NN" names → raw offset strings (same ordering)
+        sortedOffsets = sorted(demoManager.keys(), key=lambda k: int(k))
+        demoSeqToOffset = {f"demo-{i + 1:02}": off for i, off in enumerate(sortedOffsets)}
+
+        # Auto-switch to demo mode
+        self.actionDemoMode.setChecked(True)
+        self._switchToDemoMode()
+        self.statusBar().showMessage(
+            f"DEMO.DAT loaded: {len(demoDialogueJson)} entries with dialogue", 4000
+        )
+
+    def saveDemoDatFile(self):
+        if not demoManager or not demoOriginalData:
+            QMessageBox.warning(self, "Nothing loaded", "No DEMO.DAT is currently loaded.")
+            return
+        filename = QFileDialog.getSaveFileName(
+            self, "Save DEMO.DAT", demoFilePath or "", "DAT Files (*.DAT *.dat)"
+        )[0]
+        if not filename:
+            return
+        try:
+            patchedData = bytearray(demoOriginalData)
+            sortedOffsets = sorted(int(k) for k in demoManager)
+            for i, byteOffset in enumerate(sortedOffsets):
+                demoObj = demoManager[str(byteOffset)]
+                origLen = (
+                    sortedOffsets[i + 1] - byteOffset
+                    if i + 1 < len(sortedOffsets)
+                    else len(demoOriginalData) - byteOffset
+                )
+                origSlice = bytes(demoOriginalData[byteOffset: byteOffset + origLen])
+                newSlice = demoObj.getModifiedBytes(origSlice)
+                if len(newSlice) != origLen:
+                    QMessageBox.critical(
+                        self, "DEMO Save Error",
+                        f"Demo at offset {byteOffset} changed size ({origLen} → {len(newSlice)}).\n"
+                        "Cannot write — block counts must match."
+                    )
+                    return
+                patchedData[byteOffset: byteOffset + origLen] = newSlice
+            with open(filename, 'wb') as f:
+                f.write(bytes(patchedData))
+            self.statusBar().showMessage(f"DEMO.DAT saved: {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "DEMO Save Error", str(e))
+
+    def _onDemoModeToggled(self, checked: bool):
+        if checked:
+            self._switchToDemoMode()
+        else:
+            self._switchToRadioMode()
+
+    def _switchToDemoMode(self):
+        self._editorMode = "demo"
+        # Hide radio-specific widgets
+        self.ui.audioCueListView.setVisible(False)
+        self.ui.FreqLabel.setVisible(False)
+        self.ui.FreqDisplay.setVisible(False)
+        self.ui.VoxBlockAddressLabel.setVisible(False)
+        self.ui.VoxBlockAddressDisplay.setVisible(False)
+        self.ui.VoxAddressLabel.setVisible(False)
+        self.ui.VoxAddressDisplay.setVisible(False)
+        # Update label and enable play if something is loaded
+        self.ui.labelCallOffset.setText("Demo Entry")
+        self.ui.playVoxButton.setEnabled(bool(demoManager))
+        # Repopulate offset list with demo entries
+        self.ui.offsetListBox.clear()
+        sortedKeys = sorted(demoManager.keys(), key=lambda k: int(k))
+        for i, key in enumerate(sortedKeys):
+            d = demoManager[key]
+            hasDialogue = any(isinstance(s, voxCtl.captionChunk) for s in d.segments)
+            label = f"demo-{i + 1:02}  @ {key}" + (" ✦" if hasDialogue else "")
+            self.ui.offsetListBox.addItem(label, userData=key)
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+
+    def _switchToRadioMode(self):
+        self._editorMode = "radio"
+        # Restore radio-specific widgets
+        self.ui.audioCueListView.setVisible(True)
+        self.ui.FreqLabel.setVisible(True)
+        self.ui.FreqDisplay.setVisible(True)
+        self.ui.VoxBlockAddressLabel.setVisible(True)
+        self.ui.VoxBlockAddressDisplay.setVisible(True)
+        self.ui.VoxAddressLabel.setVisible(True)
+        self.ui.VoxAddressDisplay.setVisible(True)
+        # Restore label
+        self.ui.labelCallOffset.setText("Call (Offset)")
+        self.ui.playVoxButton.setEnabled(bool(voxManager))
+        # Repopulate offset list with radio calls
+        self.ui.offsetListBox.clear()
+        for offset in radioManager.getCallOffsets():
+            self.ui.offsetListBox.addItem(offset, userData=offset)
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+        self.ui.audioCueListView.clear()
+
+    def _getDemoSubtitleLines(self) -> list:
+        """Return a flat list of dialogueLine objects from the currently selected demo entry."""
+        if not demoManager or not currentDemoKey:
+            return []
+        demo = demoManager.get(currentDemoKey)
+        if demo is None:
+            return []
+        lines = []
+        for seg in demo.segments:
+            if isinstance(seg, voxCtl.captionChunk):
+                lines.extend(seg.subtitles)
+        return lines
 
 
 if __name__ == "__main__":
