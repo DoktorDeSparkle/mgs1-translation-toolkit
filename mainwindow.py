@@ -3,7 +3,8 @@ import sys, os, zipfile, json, tempfile, importlib, shutil
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem)
+    QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
+    QGroupBox, QCheckBox, QLineEdit, QFormLayout)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer
 from PySide6.QtGui import QFont, QColor, QAction
 
@@ -208,6 +209,125 @@ class NotificationDialog(QDialog):
         self.setLayout(layout)
 
 
+class FinalizeProjectDialog(QDialog):
+    """Dialog for batch-compiling all (or selected) game data files."""
+    def __init__(self, stageDirPath="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Finalize Project")
+        self.setMinimumWidth(480)
+        layout = QVBoxLayout()
+
+        # ── RADIO section ─────────────────────────────────────────────────
+        self.radioGroup = QGroupBox("RADIO.DAT")
+        self.radioGroup.setCheckable(True)
+        self.radioGroup.setChecked(True)
+        radioLayout = QFormLayout()
+
+        self.chkPrepare = QCheckBox("Prepare lengths (-p)")
+        self.chkPrepare.setChecked(True)
+        radioLayout.addRow(self.chkPrepare)
+
+        self.chkOrigHex = QCheckBox("Use original hex (-x)")
+        radioLayout.addRow(self.chkOrigHex)
+
+        self.chkDoubleWidth = QCheckBox("Double-width save blocks (-D)")
+        radioLayout.addRow(self.chkDoubleWidth)
+
+        self.chkDebug = QCheckBox("Debug output (-v)")
+        radioLayout.addRow(self.chkDebug)
+
+        stageDirRow = QHBoxLayout()
+        self.txtStageDir = QLineEdit(stageDirPath)
+        self.txtStageDir.setPlaceholderText("Path to STAGE.DIR (optional)")
+        stageDirRow.addWidget(self.txtStageDir)
+        self.btnBrowseStage = QPushButton("Browse...")
+        self.btnBrowseStage.clicked.connect(self._browseStageDir)
+        stageDirRow.addWidget(self.btnBrowseStage)
+        radioLayout.addRow("STAGE.DIR path:", stageDirRow)
+
+        self.txtStageOut = QLineEdit()
+        self.txtStageOut.setPlaceholderText("Output name for STAGE.DIR (optional, -S)")
+        radioLayout.addRow("STAGE.DIR output:", self.txtStageOut)
+
+        self.radioGroup.setLayout(radioLayout)
+        layout.addWidget(self.radioGroup)
+
+        # ── DEMO section ──────────────────────────────────────────────────
+        self.demoGroup = QGroupBox("DEMO.DAT")
+        self.demoGroup.setCheckable(True)
+        self.demoGroup.setChecked(True)
+        demoLayout = QVBoxLayout()
+        demoLayout.addWidget(QLabel("Compile JSON edits into DEMO.DAT binary."))
+        self.demoGroup.setLayout(demoLayout)
+        layout.addWidget(self.demoGroup)
+
+        # ── VOX section ───────────────────────────────────────────────────
+        self.voxGroup = QGroupBox("VOX.DAT")
+        self.voxGroup.setCheckable(True)
+        self.voxGroup.setChecked(True)
+        voxLayout = QVBoxLayout()
+        voxLayout.addWidget(QLabel("Compile JSON edits into VOX.DAT binary."))
+        self.voxGroup.setLayout(voxLayout)
+        layout.addWidget(self.voxGroup)
+
+        # ── ZMOVIE section ────────────────────────────────────────────────
+        self.zmovieGroup = QGroupBox("ZMOVIE.STR")
+        self.zmovieGroup.setCheckable(True)
+        self.zmovieGroup.setChecked(True)
+        zmovieLayout = QVBoxLayout()
+        zmovieLayout.addWidget(QLabel("Compile JSON edits into ZMOVIE.STR binary."))
+        self.zmovieGroup.setLayout(zmovieLayout)
+        layout.addWidget(self.zmovieGroup)
+
+        # ── Bottom area ───────────────────────────────────────────────────
+        self.chkReplace = QCheckBox("Replace original files")
+        layout.addWidget(self.chkReplace)
+
+        btnRow = QHBoxLayout()
+        btnFinalize = QPushButton("Finalize")
+        btnFinalize.setDefault(True)
+        btnFinalize.clicked.connect(self.accept)
+        btnRow.addWidget(btnFinalize)
+        btnCancel = QPushButton("Cancel")
+        btnCancel.clicked.connect(self.reject)
+        btnRow.addWidget(btnCancel)
+        layout.addLayout(btnRow)
+
+        self.setLayout(layout)
+
+    def _browseStageDir(self):
+        path = QFileDialog.getOpenFileName(
+            self, "Select STAGE.DIR", self.txtStageDir.text(),
+            "DIR Files (*.DIR *.dir);;All Files (*)"
+        )[0]
+        if path:
+            self.txtStageDir.setText(path)
+
+    # Convenience properties for reading results after exec()
+    @property
+    def radioEnabled(self): return self.radioGroup.isChecked()
+    @property
+    def demoEnabled(self): return self.demoGroup.isChecked()
+    @property
+    def voxEnabled(self): return self.voxGroup.isChecked()
+    @property
+    def zmovieEnabled(self): return self.zmovieGroup.isChecked()
+    @property
+    def prepare(self): return self.chkPrepare.isChecked()
+    @property
+    def useOrigHex(self): return self.chkOrigHex.isChecked()
+    @property
+    def doubleWidth(self): return self.chkDoubleWidth.isChecked()
+    @property
+    def debugOutput(self): return self.chkDebug.isChecked()
+    @property
+    def stageDirPath(self): return self.txtStageDir.text().strip()
+    @property
+    def stageOutName(self): return self.txtStageOut.text().strip()
+    @property
+    def replaceOriginals(self): return self.chkReplace.isChecked()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -308,6 +428,12 @@ class MainWindow(QMainWindow):
         self.actionCompile_ZMOVIE.setStatusTip("Compile ZMovie JSON edits into a new ZMOVIE.STR")
         self.actionCompile_ZMOVIE.triggered.connect(self.compileZmovieFile)
         self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_ZMOVIE)
+
+        self.ui.menuFile.insertSeparator(self.actionSave_VOX_DAT)
+        self.actionFinalizeProject = QAction("Finalize Project...", self)
+        self.actionFinalizeProject.setStatusTip("Batch-compile all game data files")
+        self.actionFinalizeProject.triggered.connect(self.finalizeProject)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionFinalizeProject)
 
         # ── View menu (4 mutually exclusive mode actions) ─────────────────────
         from PySide6.QtGui import QActionGroup
@@ -1349,6 +1475,200 @@ class MainWindow(QMainWindow):
 
     def _syncJsonToDemoManager(self):
         self._syncJsonToManager(demoDialogueJson, demoSeqToOffset, demoManager)
+
+    def finalizeProject(self):
+        """Batch-compile all (or selected) game data files."""
+        from argparse import Namespace
+
+        # ── Determine project folder & auto-detect STAGE.DIR ─────────────
+        projectFolder = ""
+        for path in [projectSettings.get("radio_dat_path", ""),
+                     projectSettings.get("demo_dat_path", ""),
+                     projectSettings.get("vox_dat_path", ""),
+                     projectSettings.get("zmovie_str_path", ""),
+                     demoFilePath, voxFilePath, zmovieFilePath]:
+            if path and os.path.isfile(path):
+                projectFolder = os.path.dirname(path)
+                break
+
+        stageDirAutoPath = ""
+        if projectFolder:
+            for name in os.listdir(projectFolder):
+                if name.upper() == "STAGE.DIR":
+                    stageDirAutoPath = os.path.join(projectFolder, name)
+                    break
+
+        # ── Show dialog ──────────────────────────────────────────────────
+        dlg = FinalizeProjectDialog(stageDirPath=stageDirAutoPath, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        # ── Validate prerequisites ───────────────────────────────────────
+        missing = []
+        if dlg.radioEnabled:
+            if radioManager.radioXMLData is None:
+                missing.append("RADIO: No XML data loaded.")
+        if dlg.demoEnabled:
+            if not demoManager or not demoOriginalData:
+                missing.append("DEMO: No DEMO.DAT loaded.")
+        if dlg.voxEnabled:
+            if not voxManager or not voxOriginalData:
+                missing.append("VOX: No VOX.DAT loaded.")
+        if dlg.zmovieEnabled:
+            if not zmovieOriginalData:
+                missing.append("ZMOVIE: No ZMOVIE.STR loaded.")
+        if missing:
+            QMessageBox.critical(self, "Missing Data",
+                "Cannot finalize — the following are not loaded:\n\n" +
+                "\n".join(missing))
+            return
+
+        # ── Confirm overwrite ────────────────────────────────────────────
+        if dlg.replaceOriginals:
+            ans = QMessageBox.warning(self, "Replace Original Files",
+                "This will overwrite the original files. "
+                "This cannot be undone. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+
+        results = []   # list of (label, success, detail)
+        tmpDir = tempfile.mkdtemp(prefix="mgs-finalize-")
+
+        try:
+            # ── RADIO ────────────────────────────────────────────────────
+            if dlg.radioEnabled:
+                try:
+                    import scripts.RadioDatRecompiler as RDR
+                    # Reset module globals
+                    RDR.stageBytes = b''
+                    RDR.debug = False
+                    RDR.subUseOriginalHex = False
+                    RDR.useDWidSaveB = False
+                    RDR.newOffsets = {}
+
+                    tmpXmlPath = os.path.join(tmpDir, "radio-finalize.xml")
+                    radioManager.saveXML(tmpXmlPath)
+
+                    radioDatPath = projectSettings.get("radio_dat_path", "")
+                    if dlg.replaceOriginals and radioDatPath:
+                        radioOut = radioDatPath
+                    elif radioDatPath:
+                        radioOut = os.path.join(os.path.dirname(radioDatPath), "RADIO-NEW.DAT")
+                    else:
+                        radioOut = os.path.join(projectFolder or tmpDir, "RADIO-NEW.DAT")
+
+                    stagePath = dlg.stageDirPath or None
+                    if dlg.replaceOriginals and stagePath:
+                        stageOut = dlg.stageOutName or stagePath
+                    elif stagePath:
+                        stageOut = dlg.stageOutName or os.path.join(
+                            os.path.dirname(stagePath), "STAGE-NEW.DIR")
+                    else:
+                        stageOut = None
+
+                    args = Namespace(
+                        input=tmpXmlPath, output=radioOut,
+                        stage=stagePath, stageOut=stageOut,
+                        prepare=dlg.prepare, hex=dlg.useOrigHex,
+                        debug=dlg.debugOutput, double=dlg.doubleWidth,
+                    )
+                    RDR.main(args)
+                    detail = f"RADIO.DAT → {radioOut}"
+                    if stagePath:
+                        detail += f"\nSTAGE.DIR → {stageOut}"
+                    results.append(("RADIO", True, detail))
+                except Exception as e:
+                    results.append(("RADIO", False, str(e)))
+
+            # ── DEMO ─────────────────────────────────────────────────────
+            if dlg.demoEnabled:
+                try:
+                    self._syncJsonToDemoManager()
+                    patchedData = bytearray(demoOriginalData)
+                    sortedOffsets = sorted(int(k) for k in demoManager)
+                    for i, byteOffset in enumerate(sortedOffsets):
+                        demoObj = demoManager[str(byteOffset)]
+                        origLen = (sortedOffsets[i + 1] - byteOffset
+                                   if i + 1 < len(sortedOffsets)
+                                   else len(demoOriginalData) - byteOffset)
+                        origSlice = bytes(demoOriginalData[byteOffset:byteOffset + origLen])
+                        newSlice = demoObj.getModifiedBytes(origSlice)
+                        if len(newSlice) != origLen:
+                            raise ValueError(
+                                f"Demo at offset {byteOffset} changed size "
+                                f"({origLen} → {len(newSlice)})")
+                        patchedData[byteOffset:byteOffset + origLen] = newSlice
+                    if dlg.replaceOriginals and demoFilePath:
+                        outPath = demoFilePath
+                    else:
+                        outPath = os.path.join(
+                            os.path.dirname(demoFilePath) if demoFilePath else projectFolder or tmpDir,
+                            "DEMO-NEW.DAT")
+                    with open(outPath, 'wb') as f:
+                        f.write(bytes(patchedData))
+                    results.append(("DEMO", True, f"DEMO.DAT → {outPath}"))
+                except Exception as e:
+                    results.append(("DEMO", False, str(e)))
+
+            # ── VOX ──────────────────────────────────────────────────────
+            if dlg.voxEnabled:
+                try:
+                    self._syncJsonToManager(voxDialogueJson, voxSeqToOffset, voxManager)
+                    patchedData = bytearray(voxOriginalData)
+                    sortedOffsets = sorted(int(k) for k in voxManager)
+                    for i, byteOffset in enumerate(sortedOffsets):
+                        voxObj = voxManager[str(byteOffset)]
+                        origLen = (sortedOffsets[i + 1] - byteOffset
+                                   if i + 1 < len(sortedOffsets)
+                                   else len(voxOriginalData) - byteOffset)
+                        origSlice = bytes(voxOriginalData[byteOffset:byteOffset + origLen])
+                        newSlice = voxObj.getModifiedBytes(origSlice)
+                        if len(newSlice) != origLen:
+                            raise ValueError(
+                                f"VOX at offset {byteOffset} changed size "
+                                f"({origLen} → {len(newSlice)})")
+                        patchedData[byteOffset:byteOffset + origLen] = newSlice
+                    if dlg.replaceOriginals and voxFilePath:
+                        outPath = voxFilePath
+                    else:
+                        outPath = os.path.join(
+                            os.path.dirname(voxFilePath) if voxFilePath else projectFolder or tmpDir,
+                            "VOX-NEW.DAT")
+                    with open(outPath, 'wb') as f:
+                        f.write(bytes(patchedData))
+                    results.append(("VOX", True, f"VOX.DAT → {outPath}"))
+                except Exception as e:
+                    results.append(("VOX", False, str(e)))
+
+            # ── ZMOVIE ───────────────────────────────────────────────────
+            if dlg.zmovieEnabled:
+                try:
+                    from zmovieTools.extractZmovie import compileToFile as zmCompile
+                    if dlg.replaceOriginals and zmovieFilePath:
+                        outPath = zmovieFilePath
+                    else:
+                        outPath = os.path.join(
+                            os.path.dirname(zmovieFilePath) if zmovieFilePath else projectFolder or tmpDir,
+                            "ZMOVIE-NEW.STR")
+                    zmCompile(outPath, zmovieOriginalData, zmovieDialogueJson)
+                    results.append(("ZMOVIE", True, f"ZMOVIE.STR → {outPath}"))
+                except Exception as e:
+                    results.append(("ZMOVIE", False, str(e)))
+
+        finally:
+            shutil.rmtree(tmpDir, ignore_errors=True)
+
+        # ── Summary ──────────────────────────────────────────────────────
+        lines = []
+        for label, ok, detail in results:
+            status = "OK" if ok else "FAILED"
+            lines.append(f"[{status}] {label}: {detail}")
+        summary = "\n\n".join(lines)
+        if all(ok for _, ok, _ in results):
+            QMessageBox.information(self, "Finalize Complete", summary)
+        else:
+            QMessageBox.warning(self, "Finalize Complete (with errors)", summary)
 
     def _onModeChanged(self, action: QAction):
         if action == self.actionDemoMode:
