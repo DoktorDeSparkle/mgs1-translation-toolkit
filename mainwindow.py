@@ -1,11 +1,11 @@
 # This Python file uses the following encoding: utf-8
-import sys, os
+import sys, os, zipfile, json, tempfile, importlib, shutil
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-    QPushButton, QMessageBox)
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer
+from PySide6.QtGui import QFont, QColor, QAction
 
 from ui_form import Ui_MainWindow
 
@@ -35,8 +35,33 @@ demoManager: dict[str, voxCtl.demo] = {}
 demoOriginalData: bytes = b''
 demoFilePath: str = ""
 currentDemoKey: str = ""       # sequential name, e.g. "demo-01"
+currentVoxKey:  str = ""       # sequential name, e.g. "vox-0001"
 demoDialogueJson: dict = {}    # {"demo-01": {"1234": {"duration": "...", "text": "..."}}}
 demoSeqToOffset: dict = {}     # {"demo-01": "12345"} — maps name → raw offset string
+
+# VOX mode state (mirrors demo mode)
+voxDialogueJson: dict = {}     # {"vox-0001": {"1234": {"duration": "...", "text": "..."}}}
+voxSeqToOffset:  dict = {}     # {"vox-0001": "12345"} — maps name → raw offset string
+
+# ZMovie mode state
+zmovieDialogueJson: dict  = {}   # {"zmovie-00": {"1234": {"duration": "...", "text": "..."}}}
+zmovieOriginalData: bytes = b''  # original ZMOVIE.STR bytes for patch-in-place compile
+zmovieFilePath:     str   = ""
+currentZmovieKey:   str   = ""   # e.g. "zmovie-00"
+
+# Project state
+projectSettings: dict = {}     # {"radio_dat_path": ..., "demo_dat_path": ..., "vox_dat_path": ...}
+projectFilePath: str  = ""     # path to the currently-open .mtp file (empty if unsaved)
+
+# ── Subtitle preview tuning ───────────────────────────────────────────────────
+# SUBTITLE_FPS: the frame rate the game uses for subtitle timing values.
+#   Increase → subtitles advance slower (if they're running too fast)
+#   Decrease → subtitles advance faster (if they're running too slow)
+# SUBTITLE_OFFSET_MS: additional delay (ms) before subtitle clock starts,
+#   to compensate for ffplay startup latency.
+#   Increase → subtitles appear later (if they start too early)
+SUBTITLE_FPS       = 23.69   # measured from demo-25; adjust if still off
+SUBTITLE_OFFSET_MS = 150      # ms to wait before subtitle clock starts; tune if start is off
 
 
 class VoxConversionThread(QThread):
@@ -44,8 +69,11 @@ class VoxConversionThread(QThread):
     Runs the ffmpeg VAG→WAV conversion off the main thread.
     Emits conversionDone(wavPath) when the WAV is ready, or
     errorOccurred(message) on failure.
-    Playback itself is handled by QMediaPlayer in the main thread —
-    no ffplay required, works on Windows / macOS / Linux.
+    Playback is handled by FfplayThread after conversion completes.
+
+    Uses subprocess.Popen directly so the ffmpeg process can be forcibly
+    killed via killSubprocess() — preventing race conditions when the user
+    clicks Play while a previous conversion is still running.
     """
     conversionDone = Signal(str)   # path to the finished WAV
     errorOccurred  = Signal(str)
@@ -53,14 +81,105 @@ class VoxConversionThread(QThread):
     def __init__(self, vagFile: str, parent=None):
         super().__init__(parent)
         self.vagFile = vagFile
+        self._proc = None   # holds the active Popen so killSubprocess() can reach it
+
+    def killSubprocess(self):
+        """Forcibly kill the ffmpeg subprocess if it is still running."""
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
 
     def run(self):
+        import subprocess, tempfile, ffmpeg as _ffmpeg
         try:
-            result = VAG.playVagFile(self.vagFile, convertOnly=True)
-            if result == -1:
-                self.errorOccurred.emit("Not a valid VAG file.")
+            tempDir = tempfile.gettempdir()
+            outWav  = os.path.join(tempDir, "mgs_vox_temp.wav")
+            tempL   = os.path.join(tempDir, "mgs_vox_temp_L.vag")
+            tempR   = os.path.join(tempDir, "mgs_vox_temp_R.vag")
+
+            with open(self.vagFile, 'rb') as f:
+                magic = f.read(4)
+
+            if magic == b'VAGp':
+                cmd = (_ffmpeg.input(self.vagFile, f='vag')
+                               .output(outWav)
+                               .overwrite_output()
+                               .compile())
+                self._proc = subprocess.Popen(cmd,
+                                              stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL)
+                ret = self._proc.wait()
+                self._proc = None
+                if ret not in (0, -9):   # -9 = SIGKILL (user stopped)
+                    self.errorOccurred.emit(f"ffmpeg exited with code {ret}")
+                    return
+
+            elif magic == b'VAGi':
+                VAG.splitVagFile(self.vagFile, tempL, tempR)
+                left  = _ffmpeg.input(tempL, f='vag')
+                right = _ffmpeg.input(tempR, f='vag')
+                cmd = (_ffmpeg.filter([left, right], 'join', inputs=2, channel_layout='stereo')
+                               .output(outWav, acodec='pcm_s16le')
+                               .overwrite_output()
+                               .compile())
+                self._proc = subprocess.Popen(cmd,
+                                              stdout=subprocess.DEVNULL,
+                                              stderr=subprocess.DEVNULL)
+                ret = self._proc.wait()
+                self._proc = None
+                if ret not in (0, -9):
+                    self.errorOccurred.emit(f"ffmpeg exited with code {ret}")
+                    return
+
+            else:
+                self.errorOccurred.emit(f"Not a valid VAG file (magic: {magic.hex()})")
                 return
-            self.conversionDone.emit(VAG.getTempWavPath())
+
+            if not self.isInterruptionRequested():
+                self.conversionDone.emit(outWav)
+
+        except Exception as e:
+            self.errorOccurred.emit(str(e))
+
+
+class FfplayThread(QThread):
+    """
+    Plays a WAV file via ffplay in a subprocess.
+    Emits playbackFinished when the file ends naturally,
+    or errorOccurred if ffplay fails or is not found.
+    Kill with killSubprocess() to stop mid-playback.
+    """
+    playbackFinished = Signal()
+    errorOccurred    = Signal(str)
+
+    def __init__(self, wavPath: str, parent=None):
+        super().__init__(parent)
+        self.wavPath = wavPath
+        self._proc = None
+
+    def killSubprocess(self):
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
+    def run(self):
+        import subprocess
+        try:
+            cmd = ['ffplay', '-nodisp', '-autoexit', self.wavPath]
+            self._proc = subprocess.Popen(cmd,
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+            ret = self._proc.wait()
+            self._proc = None
+            if self.isInterruptionRequested():
+                return
+            # 0 = clean exit, negative = killed by signal (user stopped)
+            if ret <= 0:
+                self.playbackFinished.emit()
+            else:
+                self.errorOccurred.emit(f"ffplay exited with code {ret}")
+        except FileNotFoundError:
+            self.errorOccurred.emit("ffplay not found — is FFmpeg installed and on PATH?")
         except Exception as e:
             self.errorOccurred.emit(str(e))
 
@@ -120,8 +239,31 @@ class MainWindow(QMainWindow):
         # ── Edit buttons (added programmatically) ────────────────────────────
         self._addEditButtons()
 
+        # ── Project actions (top of File menu) ───────────────────────────────
+        self.actionOpenFolder = QAction("Open Folder...", self)
+        self.actionOpenFolder.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, and VOX.DAT from a folder")
+        self.actionOpenFolder.triggered.connect(self.openFolder)
+        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionOpenFolder)
+
+        self.actionOpenProject = QAction("Open Project (.mtp)...", self)
+        self.actionOpenProject.setStatusTip("Open a saved MTP project file")
+        self.actionOpenProject.triggered.connect(self.openProject)
+        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionOpenProject)
+
+        self.actionSaveProject = QAction("Save Project", self)
+        self.actionSaveProject.setStatusTip("Save the current project to its .mtp file")
+        self.actionSaveProject.setEnabled(False)
+        self.actionSaveProject.triggered.connect(self.saveProject)
+        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionSaveProject)
+
+        self.actionSaveProjectAs = QAction("Save Project As...", self)
+        self.actionSaveProjectAs.setStatusTip("Save the current project to a new .mtp file")
+        self.actionSaveProjectAs.triggered.connect(self.saveProjectAs)
+        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionSaveProjectAs)
+
+        self.ui.menuFile.insertSeparator(self.ui.actionLoad_RADIO_DAT)
+
         # ── Add Save/Load VOX and DEMO actions (not in generated form) ────────
-        from PySide6.QtGui import QAction
         self.actionSave_VOX_DAT = QAction("Save VOX.DAT", self)
         self.actionSave_VOX_DAT.setStatusTip("Write timing edits back to VOX.DAT")
         self.actionSave_VOX_DAT.triggered.connect(self.saveVoxDatFile)
@@ -132,33 +274,110 @@ class MainWindow(QMainWindow):
         self.actionLoad_DEMO_DAT.triggered.connect(self.loadDemoData)
         self.ui.menuFile.insertAction(self.ui.actionLoad_VOX_DAT, self.actionLoad_DEMO_DAT)
 
-        self.actionSave_DEMO_DAT = QAction("Save DEMO.DAT", self)
-        self.actionSave_DEMO_DAT.setStatusTip("Write demo subtitle/timing edits back to DEMO.DAT")
-        self.actionSave_DEMO_DAT.triggered.connect(self.saveDemoDatFile)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionSave_DEMO_DAT)
+        self.actionExport_DEMO_JSON = QAction("Export DEMO JSON...", self)
+        self.actionExport_DEMO_JSON.setStatusTip("Save subtitle edits to a JSON file")
+        self.actionExport_DEMO_JSON.triggered.connect(self.exportDemoJson)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_DEMO_JSON)
 
-        # ── View menu (mode toggle) ───────────────────────────────────────────
+        self.actionCompile_DEMO_DAT = QAction("Compile DEMO.DAT...", self)
+        self.actionCompile_DEMO_DAT.setStatusTip("Compile JSON edits into a new DEMO.DAT binary")
+        self.actionCompile_DEMO_DAT.triggered.connect(self.compileDemoDatFile)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_DEMO_DAT)
+
+        self.actionExport_VOX_JSON = QAction("Export VOX JSON...", self)
+        self.actionExport_VOX_JSON.setStatusTip("Save VOX subtitle edits to a JSON file")
+        self.actionExport_VOX_JSON.triggered.connect(self.exportVoxJson)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_VOX_JSON)
+
+        self.actionCompile_VOX_DAT = QAction("Compile VOX.DAT...", self)
+        self.actionCompile_VOX_DAT.setStatusTip("Compile VOX JSON edits into a new VOX.DAT binary")
+        self.actionCompile_VOX_DAT.triggered.connect(self.compileVoxDatFile)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_VOX_DAT)
+
+        self.actionLoad_ZMOVIE = QAction("Load ZMOVIE.STR...", self)
+        self.actionLoad_ZMOVIE.setStatusTip("Load a ZMOVIE.STR file for subtitle editing")
+        self.actionLoad_ZMOVIE.triggered.connect(self.loadZmovieData)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionLoad_ZMOVIE)
+
+        self.actionExport_ZMOVIE_JSON = QAction("Export ZMovie JSON...", self)
+        self.actionExport_ZMOVIE_JSON.setStatusTip("Save ZMovie subtitle edits to a JSON file")
+        self.actionExport_ZMOVIE_JSON.triggered.connect(self.exportZmovieJson)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_ZMOVIE_JSON)
+
+        self.actionCompile_ZMOVIE = QAction("Compile ZMOVIE.STR...", self)
+        self.actionCompile_ZMOVIE.setStatusTip("Compile ZMovie JSON edits into a new ZMOVIE.STR")
+        self.actionCompile_ZMOVIE.triggered.connect(self.compileZmovieFile)
+        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_ZMOVIE)
+
+        # ── View menu (4 mutually exclusive mode actions) ─────────────────────
+        from PySide6.QtGui import QActionGroup
         viewMenu = self.menuBar().addMenu("View")
-        self.actionDemoMode = QAction("Demo Editor Mode", self)
+        self._modeGroup = QActionGroup(self)
+        self._modeGroup.setExclusive(True)
+
+        self.actionRadioMode = QAction("Radio Mode", self)
+        self.actionRadioMode.setCheckable(True)
+        self.actionRadioMode.setChecked(True)
+        self.actionRadioMode.setStatusTip("Switch to Radio codec call editor")
+        self._modeGroup.addAction(self.actionRadioMode)
+        viewMenu.addAction(self.actionRadioMode)
+
+        self.actionDemoMode = QAction("Demo Mode", self)
         self.actionDemoMode.setCheckable(True)
-        self.actionDemoMode.setStatusTip("Toggle between Radio and Demo editing modes")
-        self.actionDemoMode.triggered.connect(self._onDemoModeToggled)
+        self.actionDemoMode.setStatusTip("Switch to Demo/cutscene subtitle editor")
+        self._modeGroup.addAction(self.actionDemoMode)
         viewMenu.addAction(self.actionDemoMode)
+
+        self.actionVoxMode = QAction("VOX Mode", self)
+        self.actionVoxMode.setCheckable(True)
+        self.actionVoxMode.setStatusTip("Switch to VOX audio subtitle editor")
+        self._modeGroup.addAction(self.actionVoxMode)
+        viewMenu.addAction(self.actionVoxMode)
+
+        self.actionZmovieMode = QAction("ZMovie Mode", self)
+        self.actionZmovieMode.setCheckable(True)
+        self.actionZmovieMode.setStatusTip("Switch to ZMovie FMV subtitle editor")
+        self._modeGroup.addAction(self.actionZmovieMode)
+        viewMenu.addAction(self.actionZmovieMode)
+
+        self._modeGroup.triggered.connect(self._onModeChanged)
+
+        # ── Mode tab bar ───────────────────────────────────────────────────────
+        from PySide6.QtWidgets import QToolBar, QTabBar
+        self._modeToolBar = QToolBar("Editor Mode", self)
+        self._modeToolBar.setMovable(False)
+        self._modeToolBar.setFloatable(False)
+        self._modeTabBar = QTabBar()
+        self._modeTabBar.setExpanding(False)
+        self._modeTabBar.addTab("Radio")
+        self._modeTabBar.addTab("Demo")
+        self._modeTabBar.addTab("VOX")
+        self._modeTabBar.addTab("ZMovie")
+        self._modeToolBar.addWidget(self._modeTabBar)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._modeToolBar)
+        self._modeTabBar.currentChanged.connect(self._onTabChanged)
 
         # Internal flag to suppress spinbox signals while loading data
         self._loadingSubtitle = False
+        # True whenever there are unsaved edits (either mode)
+        self._modified = False
 
-        # ── Audio player (QMediaPlayer — no ffplay needed, cross-platform) ───
-        self._audioOutput = QAudioOutput(self)
-        self._player = QMediaPlayer(self)
-        self._player.setAudioOutput(self._audioOutput)
-        self._player.playbackStateChanged.connect(self._onPlaybackStateChanged)
-        self._player.errorOccurred.connect(
-            lambda err, msg: self._onPlaybackError(msg)
-        )
-
-        # Conversion thread (None when idle)
+        # Playback threads (None when idle)
         self._convThread: VoxConversionThread = None
+        self._playThread: FfplayThread = None
+
+        # Elapsed timer for subtitle sync — started when ffplay launches
+        self._elapsed = QElapsedTimer()
+        # Tracks which demo keys have already had fps estimated (so we only print once each)
+        self._fpsEstimated: set = set()
+
+        # ── Subtitle preview (graphicsView) ──────────────────────────────────
+        self._setupSubtitlePreview()
+
+        # Frame timer — ticks at ~30 fps to drive subtitle sync
+        self._frameTimer = QTimer(self)
+        self._frameTimer.setInterval(33)
+        self._frameTimer.timeout.connect(self._tickPreview)
 
     # ── UI additions ─────────────────────────────────────────────────────────
 
@@ -192,7 +411,6 @@ class MainWindow(QMainWindow):
         self.stopVoxButton.setToolTip("Stop audio playback")
         self.stopVoxButton.setEnabled(False)
         self.stopVoxButton.clicked.connect(self.stopVoxFile)
-        # Insert immediately after playVoxButton in horizontalLayout_2
         play_idx = self.ui.horizontalLayout_2.indexOf(self.ui.playVoxButton)
         self.ui.horizontalLayout_2.insertWidget(play_idx + 1, self.stopVoxButton)
 
@@ -231,15 +449,29 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Dialogue Editor — {os.path.basename(filename)}")
 
     def loadVoxData(self):
-        global voxManager, voxOriginalData, voxFilePath
         voxFile = self.openFileDialog("DAT Files (*.DAT *.dat)", "Load VOX.DAT")
         if not voxFile:
             return
+        self._loadVoxFromPath(voxFile)
+        self._switchToVoxMode()
+
+    def _loadVoxFromPath(self, voxFile: str):
+        global voxManager, voxOriginalData, voxFilePath, voxDialogueJson, voxSeqToOffset
         voxOriginalData = open(voxFile, 'rb').read()
         voxFilePath = voxFile
         voxManager = DM.parseDemoFile(voxOriginalData)
+        try:
+            from DemoTools.extractDemoVox import extractFromFile
+            voxDialogueJson = extractFromFile(voxFile, fileType='vox')
+        except Exception as e:
+            print(f"Warning: VOX dialogue extraction failed: {e}")
+            voxDialogueJson = {}
+        sortedOffsets = sorted(voxManager.keys(), key=lambda k: int(k))
+        voxSeqToOffset = {f"vox-{i + 1:04}": off for i, off in enumerate(sortedOffsets)}
         self.ui.playVoxButton.setEnabled(True)
-        self.statusBar().showMessage(f"VOX.DAT loaded: {len(voxManager)} clips", 4000)
+        self.statusBar().showMessage(
+            f"VOX.DAT loaded: {len(voxManager)} clips, {len(voxDialogueJson)} with dialogue", 4000
+        )
 
     def saveRadioXMLFile(self):
         if radioManager.radioXMLData is None:
@@ -251,6 +483,7 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         if radioManager.saveXML(filename):
+            self._modified = False
             self.statusBar().showMessage(f"Saved: {filename}", 4000)
         else:
             QMessageBox.critical(self, "Save failed", f"Could not write to {filename}")
@@ -322,6 +555,10 @@ class MainWindow(QMainWindow):
         """Route to the appropriate handler depending on the current editor mode."""
         if self._editorMode == "demo":
             self._selectDemo(index)
+        elif self._editorMode == "vox":
+            self._selectVox(index)
+        elif self._editorMode == "zmovie":
+            self._selectZmovie(index)
         else:
             self._selectRadioCall(index)
 
@@ -350,15 +587,51 @@ class MainWindow(QMainWindow):
         global currentDemoKey, currentSubIndex
         if index == -1:
             return
-        key = self.ui.offsetListBox.currentData()
+        key = self.ui.offsetListBox.currentData()  # "demo-NN"
         if key is None:
             return
         currentDemoKey = key
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        for sub in self._getDemoSubtitleLines():
-            text = sub.text.replace('\x00', '') or f"[Frame {sub.startFrame}]"
+        subtitles = demoDialogueJson.get(key, {})
+        for startFrame in sorted(subtitles.keys(), key=int):
+            sub = subtitles[startFrame]
+            text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
+            QListWidgetItem(text, self.ui.subsPreviewList)
+
+    def _selectZmovie(self, index):
+        global currentZmovieKey, currentSubIndex
+        if index == -1:
+            return
+        key = self.ui.offsetListBox.currentData()
+        if key is None:
+            return
+        currentZmovieKey = key
+        currentSubIndex = -1
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+        subtitles = zmovieDialogueJson.get(key, {})
+        for startFrame in sorted(subtitles.keys(), key=int):
+            sub = subtitles[startFrame]
+            text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
+            QListWidgetItem(text, self.ui.subsPreviewList)
+
+    def _selectVox(self, index):
+        global currentVoxKey, currentSubIndex
+        if index == -1:
+            return
+        key = self.ui.offsetListBox.currentData()  # "vox-NNNN"
+        if key is None:
+            return
+        currentVoxKey = key
+        currentSubIndex = -1
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+        subtitles = voxDialogueJson.get(key, {})
+        for startFrame in sorted(subtitles.keys(), key=int):
+            sub = subtitles[startFrame]
+            text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
             QListWidgetItem(text, self.ui.subsPreviewList)
 
     def selectAudioCue(self, item):
@@ -395,13 +668,16 @@ class MainWindow(QMainWindow):
 
         self._loadingSubtitle = True
 
-        if self._editorMode == "demo":
-            lines = self._getDemoSubtitleLines()
-            if idx < len(lines):
-                sub = lines[idx]
-                self.ui.DialogueEditorBox.setText(sub.text.replace('\x00', ''))
-                self.ui.startFrameBox.setValue(sub.startFrame)
-                self.ui.durationBox.setValue(sub.displayFrames)
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            key, djson = self._modeData()
+            subtitles = djson.get(key, {})
+            sortedFrames = sorted(subtitles.keys(), key=int)
+            if idx < len(sortedFrames):
+                frame = sortedFrames[idx]
+                sub = subtitles[frame]
+                self.ui.DialogueEditorBox.setText(sub.get("text", "").replace("｜", "\n"))
+                self.ui.startFrameBox.setValue(int(frame))
+                self.ui.durationBox.setValue(int(sub.get("duration", "0")))
             else:
                 self.ui.DialogueEditorBox.clear()
                 self.ui.startFrameBox.setValue(0)
@@ -439,7 +715,7 @@ class MainWindow(QMainWindow):
             return []
         lines = []
         for seg in demo.segments:
-            if isinstance(seg, voxCtl.captionChunk):
+            if hasattr(seg, 'subtitles'):
                 lines.extend(seg.subtitles)
         return lines
 
@@ -466,16 +742,24 @@ class MainWindow(QMainWindow):
         if currentSubIndex < 0:
             return
 
-        if self._editorMode == "demo":
-            lines = self._getDemoSubtitleLines()
-            if currentSubIndex < len(lines):
-                sub = lines[currentSubIndex]
-                sub.text = self.ui.DialogueEditorBox.toPlainText()
-                sub.startFrame = self.ui.startFrameBox.value()
-                sub.displayFrames = self.ui.durationBox.value()
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            key, djson = self._modeData()
+            subtitles = djson.get(key, {})
+            sortedFrames = sorted(subtitles.keys(), key=int)
+            if currentSubIndex < len(sortedFrames):
+                oldFrame = sortedFrames[currentSubIndex]
+                newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
+                newStart = str(self.ui.startFrameBox.value())
+                newDur = str(self.ui.durationBox.value())
+                del subtitles[oldFrame]
+                subtitles[newStart] = {"duration": newDur, "text": newText}
+            self._modified = True
             self._refreshSubsList()
             self.applyEditButton.setStyleSheet("")
-            self.statusBar().showMessage("Changes applied (unsaved — use File → Save DEMO.DAT)", 5000)
+            label = {"demo": "DEMO", "vox": "VOX", "zmovie": "ZMovie"}.get(self._editorMode, "")
+            self.statusBar().showMessage(
+                f"Changes applied (unsaved \u2014 use File \u2192 Export {label} JSON)", 5000
+            )
             return
 
         # --- Text → XML -------------------------------------------------------
@@ -489,6 +773,7 @@ class MainWindow(QMainWindow):
             lines[currentSubIndex].displayFrames = self.ui.durationBox.value()
 
         # Refresh subtitle list to show new text
+        self._modified = True
         self._refreshSubsList()
         self.applyEditButton.setStyleSheet("")
         self.statusBar().showMessage("Changes applied (unsaved — use File → Save RADIO.XML)", 5000)
@@ -590,9 +875,12 @@ class MainWindow(QMainWindow):
     def _refreshSubsList(self):
         """Rebuild the subtitle list widget from the current data source."""
         self.ui.subsPreviewList.clear()
-        if self._editorMode == "demo":
-            for sub in self._getDemoSubtitleLines():
-                text = sub.text.replace('\x00', '') or f"[Frame {sub.startFrame}]"
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            key, djson = self._modeData()
+            subtitles = djson.get(key, {})
+            for startFrame in sorted(subtitles.keys(), key=int):
+                sub = subtitles[startFrame]
+                text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
                 QListWidgetItem(text, self.ui.subsPreviewList)
         else:
             for text in radioManager.getSubs():
@@ -614,12 +902,22 @@ class MainWindow(QMainWindow):
 
     def playVoxFile(self):
         if self._editorMode == "demo":
-            if not currentDemoKey or not demoManager:
+            offset = demoSeqToOffset.get(currentDemoKey)
+            if not offset or not demoManager:
                 self.statusBar().showMessage("No demo entry selected.", 3000)
                 return
-            demo = demoManager.get(currentDemoKey)
+            demo = demoManager.get(offset)
             if demo is None:
-                self.statusBar().showMessage(f"Demo entry not found: {currentDemoKey}", 3000)
+                self.statusBar().showMessage(f"Demo audio not found for: {currentDemoKey}", 3000)
+                return
+        elif self._editorMode == "vox":
+            offset = voxSeqToOffset.get(currentVoxKey)
+            if not offset or not voxManager:
+                self.statusBar().showMessage("No VOX entry selected.", 3000)
+                return
+            demo = voxManager.get(offset)
+            if demo is None:
+                self.statusBar().showMessage(f"VOX audio not found for: {currentVoxKey}", 3000)
                 return
         else:
             voxOffset = self.ui.VoxAddressDisplay.text()
@@ -639,7 +937,27 @@ class MainWindow(QMainWindow):
         self.stopVoxFile()
 
         import tempfile
-        vagFile = voxCtl.outputVagFile(demo, "mgs_vox_temp", tempfile.gettempdir())
+        # Check audio exists before attempting extraction
+        if demo.getAudioHeader() is None:
+            self.statusBar().showMessage("This entry has no audio data.", 3000)
+            self._resetPlaybackButtons()
+            return
+
+        try:
+            vagFile = voxCtl.outputVagFile(demo, "mgs_vox_temp", tempfile.gettempdir())
+            # Patch VAG header if sample rate is 0 (unknown byte code in SAMPLE_RATES)
+            with open(vagFile, 'r+b') as vf:
+                vf.seek(16)
+                sr = int.from_bytes(vf.read(4), 'big')
+                if sr == 0:
+                    raw_code = audioHdr.content[6] if len(audioHdr.content) > 6 else 0xFF
+                    print(f"Unknown VAG sample rate code 0x{raw_code:02X} — add to SAMPLE_RATES; defaulting to 22050 Hz")
+                    vf.seek(16)
+                    vf.write((22050).to_bytes(4, 'big'))
+        except Exception as e:
+            self.statusBar().showMessage(f"Audio extract failed: {e}", 6000)
+            self._resetPlaybackButtons()
+            return
 
         self._convThread = VoxConversionThread(vagFile, parent=self)
         self._convThread.conversionDone.connect(self._onConversionDone)
@@ -651,74 +969,278 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Converting…")
 
     def stopVoxFile(self):
-        """Stop conversion thread (if running) and stop QMediaPlayer."""
+        """Kill any running conversion or playback subprocess."""
         if self._convThread and self._convThread.isRunning():
+            self._convThread.killSubprocess()
             self._convThread.requestInterruption()
-            self._convThread.wait(500)
-        self._player.stop()
+            self._convThread.wait(2000)
+        if self._playThread and self._playThread.isRunning():
+            self._playThread.killSubprocess()
+            self._playThread.requestInterruption()
+            self._playThread.wait(1000)
+        self._stopPreview()
         self._resetPlaybackButtons()
 
+    def closeEvent(self, event):
+        """Warn about unsaved edits, then kill audio before closing."""
+        if self._modified:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "You have unsaved edits. Quit anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                event.ignore()
+                return
+        self.stopVoxFile()
+        event.accept()
+
     def _onConversionDone(self, wavPath: str):
-        """Called from the conversion thread when the WAV is ready."""
-        self._player.setSource(QUrl.fromLocalFile(wavPath))
-        self._player.play()
+        """Launch ffplay on the converted WAV and start the subtitle timer."""
+        self._estimateSubtitleFps(wavPath)
+        self._playThread = FfplayThread(wavPath, parent=self)
+        self._playThread.playbackFinished.connect(self._onPlaybackFinished)
+        self._playThread.errorOccurred.connect(self._onPlaybackError)
+        self._playThread.start()
+        self._elapsed.restart()
+        self._frameTimer.start()
         self.statusBar().showMessage("Playing…")
 
-    def _onPlaybackStateChanged(self, state):
-        if state == QMediaPlayer.PlaybackState.StoppedState:
-            self._resetPlaybackButtons()
-            self.statusBar().showMessage("Playback finished.", 2000)
+    def _estimateSubtitleFps(self, wavPath: str):
+        """
+        Estimate the subtitle frame rate by comparing audio duration to the
+        last subtitle's end frame.  Prints to console for tuning SUBTITLE_FPS.
+        Only runs once per unique demo entry, in demo mode only.
+        """
+        if self._editorMode not in ("demo", "vox", "zmovie"):
+            return
+        key, djson = self._modeData()
+        if key in self._fpsEstimated:
+            return
+        import wave
+        subtitles = djson.get(key, {})
+        if not subtitles:
+            return
+
+        last_end = max(
+            int(sf) + int(sub.get("duration", "0"))
+            for sf, sub in subtitles.items()
+        )
+        if last_end == 0:
+            return
+
+        try:
+            with wave.open(wavPath, 'rb') as w:
+                audio_duration = w.getnframes() / w.getframerate()
+        except Exception as e:
+            print(f"[subtitle fps] Could not read WAV duration: {e}")
+            return
+
+        estimated_fps = last_end / audio_duration
+        self._fpsEstimated.add(key)
+        print(
+            f"[subtitle fps] {key}: "
+            f"audio={audio_duration:.3f}s  "
+            f"last_end_frame={last_end}  "
+            f"\u2192 estimated fps={estimated_fps:.4f}"
+        )
+
+    def _onPlaybackFinished(self):
+        self._stopPreview()
+        self._resetPlaybackButtons()
+        self.statusBar().showMessage("Playback finished.", 2000)
 
     def _onPlaybackError(self, msg: str):
+        self._stopPreview()
         self._resetPlaybackButtons()
         self.statusBar().showMessage(f"Audio error: {msg}", 5000)
 
     def _resetPlaybackButtons(self):
-        self.ui.playVoxButton.setEnabled(bool(voxManager) or bool(demoManager))
+        # ZMovie uses STR video format — no audio playback supported
+        can_play = (self._editorMode != "zmovie") and (bool(voxManager) or bool(demoManager))
+        self.ui.playVoxButton.setEnabled(can_play)
         self.stopVoxButton.setEnabled(False)
 
+    # ── Subtitle preview ──────────────────────────────────────────────────────
+
+    def _setupSubtitlePreview(self):
+        """Initialise the QGraphicsScene used for the subtitle preview."""
+        self._previewScene = QGraphicsScene(self)
+        self._previewScene.setBackgroundBrush(QColor(0, 0, 0))
+        self.ui.graphicsView.setScene(self._previewScene)
+        self.ui.graphicsView.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.ui.graphicsView.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        self._previewTextItem = QGraphicsTextItem()
+        font = QFont("Arial", 24, QFont.Weight.Bold)
+        self._previewTextItem.setFont(font)
+        self._previewTextItem.setDefaultTextColor(QColor(255, 255, 255))
+        self._previewTextItem.setTextWidth(-1)  # no word-wrap; honour explicit newlines only
+        self._previewScene.addItem(self._previewTextItem)
+
+    def _tickPreview(self):
+        """Called ~30× per second while audio is playing. Updates the subtitle overlay."""
+        elapsed_ms = max(0, self._elapsed.elapsed() - SUBTITLE_OFFSET_MS)
+        currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
+        text = ""
+
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            key, djson = self._modeData()
+            for startFrame, sub in djson.get(key, {}).items():
+                sf = int(startFrame)
+                dur = int(sub.get("duration", "0"))
+                if sf <= currentFrame < sf + dur:
+                    text = sub.get("text", "").replace("｜", "\n")
+                    break
+        else:
+            for line in self._getVoxSubtitleLines():
+                if line.startFrame <= currentFrame < line.startFrame + line.displayFrames:
+                    text = line.text.replace('\x00', '').replace("｜", "\n")
+                    break
+
+        self._previewTextItem.setPlainText(text)
+        self._positionPreviewText()
+
+    def _positionPreviewText(self):
+        """Centre the text item horizontally and pin it near the bottom of the view."""
+        vw = self.ui.graphicsView.viewport().width()
+        vh = self.ui.graphicsView.viewport().height()
+        self._previewScene.setSceneRect(0, 0, vw, vh)
+        br = self._previewTextItem.boundingRect()
+        x = max(0.0, (vw - br.width()) / 2)
+        y = max(0.0, vh - br.height() - 12)
+        self._previewTextItem.setPos(x, y)
+
+    def _stopPreview(self):
+        """Stop the frame timer and clear the subtitle overlay."""
+        self._frameTimer.stop()
+        self._previewTextItem.setPlainText("")
 
     # ── Demo mode ─────────────────────────────────────────────────────────────
 
     def loadDemoData(self):
-        global demoManager, demoOriginalData, demoFilePath
-        global demoDialogueJson, demoSeqToOffset
         demoFile = self.openFileDialog("DAT Files (*.DAT *.dat)", "Load DEMO.DAT")
         if not demoFile:
             return
+        self._loadDemoFromPath(demoFile)
+        self._switchToDemoMode()
+        self.statusBar().showMessage(
+            f"DEMO.DAT loaded: {len(demoDialogueJson)} entries with dialogue", 4000
+        )
+
+    def _loadDemoFromPath(self, demoFile: str):
+        global demoManager, demoOriginalData, demoFilePath, demoDialogueJson, demoSeqToOffset
         demoOriginalData = open(demoFile, 'rb').read()
         demoFilePath = demoFile
         demoManager = DM.parseDemoFile(demoOriginalData)
-
-        # Extract dialogue JSON directly from the file (no pre-splitting needed)
         try:
             from DemoTools.extractDemoVox import extractFromFile
             demoDialogueJson = extractFromFile(demoFile, fileType="demo")
         except Exception as e:
             print(f"Warning: dialogue extraction failed: {e}")
             demoDialogueJson = {}
-
-        # Map sequential "demo-NN" names → raw offset strings (same ordering)
         sortedOffsets = sorted(demoManager.keys(), key=lambda k: int(k))
         demoSeqToOffset = {f"demo-{i + 1:02}": off for i, off in enumerate(sortedOffsets)}
 
-        # Auto-switch to demo mode
-        self.actionDemoMode.setChecked(True)
-        self._switchToDemoMode()
-        self.statusBar().showMessage(
-            f"DEMO.DAT loaded: {len(demoDialogueJson)} entries with dialogue", 4000
-        )
-
-    def saveDemoDatFile(self):
-        if not demoManager or not demoOriginalData:
-            QMessageBox.warning(self, "Nothing loaded", "No DEMO.DAT is currently loaded.")
+    def loadZmovieData(self):
+        zmovieFile = self.openFileDialog("STR Files (*.STR *.str);;All Files (*)", "Load ZMOVIE.STR")
+        if not zmovieFile:
             return
+        try:
+            self._loadZmovieFromPath(zmovieFile)
+            self._switchToZmovieMode()
+            self.statusBar().showMessage(
+                f"ZMOVIE.STR loaded: {len(zmovieDialogueJson)} entries with subtitles", 4000
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Load Error", str(e))
+
+    def _loadZmovieFromPath(self, zmovieFile: str):
+        global zmovieDialogueJson, zmovieOriginalData, zmovieFilePath
+        from zmovieTools.extractZmovie import extractFromFile as zmExtract
+        zmovieOriginalData = open(zmovieFile, 'rb').read()
+        zmovieFilePath = zmovieFile
+        try:
+            zmovieDialogueJson = zmExtract(zmovieFile)
+        except Exception as e:
+            print(f"Warning: ZMovie subtitle extraction failed: {e}")
+            zmovieDialogueJson = {}
+
+    def exportZmovieJson(self):
+        """Save zmovieDialogueJson to a JSON file."""
+        if not zmovieDialogueJson:
+            QMessageBox.warning(self, "Nothing loaded", "No ZMOVIE.STR is currently loaded.")
+            return
+        stem = os.path.splitext(os.path.basename(zmovieFilePath))[0].lower() if zmovieFilePath else "zmovie"
+        default = os.path.join(os.path.dirname(zmovieFilePath) if zmovieFilePath else "",
+                               f"{stem}-dialogue.json")
         filename = QFileDialog.getSaveFileName(
-            self, "Save DEMO.DAT", demoFilePath or "", "DAT Files (*.DAT *.dat)"
+            self, "Export ZMovie JSON", default, "JSON Files (*.json)"
         )[0]
         if not filename:
             return
         try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(zmovieDialogueJson, f, ensure_ascii=False, indent=2)
+            self._modified = False
+            self.statusBar().showMessage(f"ZMovie JSON exported: {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def compileZmovieFile(self):
+        """Compile zmovieDialogueJson into a new ZMOVIE.STR using extractZmovie.compileToFile."""
+        if not zmovieOriginalData:
+            QMessageBox.warning(self, "Nothing loaded", "No ZMOVIE.STR is currently loaded.")
+            return
+        filename = QFileDialog.getSaveFileName(
+            self, "Compile ZMOVIE.STR", zmovieFilePath or "", "STR Files (*.STR *.str)"
+        )[0]
+        if not filename:
+            return
+        try:
+            from zmovieTools.extractZmovie import compileToFile as zmCompile
+            zmCompile(filename, zmovieOriginalData, zmovieDialogueJson)
+            self._modified = False
+            self.statusBar().showMessage(f"ZMOVIE.STR compiled: {filename}", 5000)
+        except ValueError as e:
+            QMessageBox.critical(self, "Compile Error — Subtitle Too Long", str(e))
+        except Exception as e:
+            QMessageBox.critical(self, "Compile Error", str(e))
+
+    def exportDemoJson(self):
+        """Save demoDialogueJson to a JSON file — the intermediate format for scripts."""
+        import json
+        if not demoDialogueJson:
+            QMessageBox.warning(self, "Nothing loaded", "No DEMO.DAT is currently loaded.")
+            return
+        stem = os.path.splitext(os.path.basename(demoFilePath))[0].lower() if demoFilePath else "demo"
+        default = os.path.join(os.path.dirname(demoFilePath) if demoFilePath else "", f"{stem}-dialogue.json")
+        filename = QFileDialog.getSaveFileName(
+            self, "Export DEMO JSON", default, "JSON Files (*.json)"
+        )[0]
+        if not filename:
+            return
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(demoDialogueJson, f, ensure_ascii=False, indent=2)
+            self._modified = False
+            self.statusBar().showMessage(f"DEMO JSON exported: {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def compileDemoDatFile(self):
+        """Sync JSON edits into demoManager, then patch-in-place and write a new DEMO.DAT."""
+        if not demoManager or not demoOriginalData:
+            QMessageBox.warning(self, "Nothing loaded", "No DEMO.DAT is currently loaded.")
+            return
+        filename = QFileDialog.getSaveFileName(
+            self, "Compile DEMO.DAT", demoFilePath or "", "DAT Files (*.DAT *.dat)"
+        )[0]
+        if not filename:
+            return
+        try:
+            self._syncJsonToDemoManager()
             patchedData = bytearray(demoOriginalData)
             sortedOffsets = sorted(int(k) for k in demoManager)
             for i, byteOffset in enumerate(sortedOffsets):
@@ -732,7 +1254,7 @@ class MainWindow(QMainWindow):
                 newSlice = demoObj.getModifiedBytes(origSlice)
                 if len(newSlice) != origLen:
                     QMessageBox.critical(
-                        self, "DEMO Save Error",
+                        self, "Compile Error",
                         f"Demo at offset {byteOffset} changed size ({origLen} → {len(newSlice)}).\n"
                         "Cannot write — block counts must match."
                     )
@@ -740,19 +1262,134 @@ class MainWindow(QMainWindow):
                 patchedData[byteOffset: byteOffset + origLen] = newSlice
             with open(filename, 'wb') as f:
                 f.write(bytes(patchedData))
-            self.statusBar().showMessage(f"DEMO.DAT saved: {filename}", 5000)
+            self._modified = False
+            self.statusBar().showMessage(f"DEMO.DAT compiled: {filename}", 5000)
         except Exception as e:
-            QMessageBox.critical(self, "DEMO Save Error", str(e))
+            QMessageBox.critical(self, "Compile Error", str(e))
 
-    def _onDemoModeToggled(self, checked: bool):
-        if checked:
+    def exportVoxJson(self):
+        """Save voxDialogueJson to a JSON file."""
+        if not voxDialogueJson:
+            QMessageBox.warning(self, "Nothing loaded", "No VOX.DAT is currently loaded.")
+            return
+        stem = os.path.splitext(os.path.basename(voxFilePath))[0].lower() if voxFilePath else "vox"
+        default = os.path.join(os.path.dirname(voxFilePath) if voxFilePath else "",
+                               f"{stem}-dialogue.json")
+        filename = QFileDialog.getSaveFileName(
+            self, "Export VOX JSON", default, "JSON Files (*.json)"
+        )[0]
+        if not filename:
+            return
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(voxDialogueJson, f, ensure_ascii=False, indent=2)
+            self._modified = False
+            self.statusBar().showMessage(f"VOX JSON exported: {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
+
+    def compileVoxDatFile(self):
+        """Sync voxDialogueJson into voxManager, then patch-in-place and write a new VOX.DAT."""
+        if not voxManager or not voxOriginalData:
+            QMessageBox.warning(self, "Nothing loaded", "No VOX.DAT is currently loaded.")
+            return
+        filename = QFileDialog.getSaveFileName(
+            self, "Compile VOX.DAT", voxFilePath or "", "DAT Files (*.DAT *.dat)"
+        )[0]
+        if not filename:
+            return
+        try:
+            self._syncJsonToManager(voxDialogueJson, voxSeqToOffset, voxManager)
+            patchedData = bytearray(voxOriginalData)
+            sortedOffsets = sorted(int(k) for k in voxManager)
+            for i, byteOffset in enumerate(sortedOffsets):
+                voxObj = voxManager[str(byteOffset)]
+                origLen = (
+                    sortedOffsets[i + 1] - byteOffset
+                    if i + 1 < len(sortedOffsets)
+                    else len(voxOriginalData) - byteOffset
+                )
+                origSlice = bytes(voxOriginalData[byteOffset: byteOffset + origLen])
+                newSlice = voxObj.getModifiedBytes(origSlice)
+                if len(newSlice) != origLen:
+                    QMessageBox.critical(
+                        self, "Compile Error",
+                        f"VOX at offset {byteOffset} changed size ({origLen} \u2192 {len(newSlice)}).\n"
+                        "Cannot write \u2014 block counts must match."
+                    )
+                    return
+                patchedData[byteOffset: byteOffset + origLen] = newSlice
+            with open(filename, 'wb') as f:
+                f.write(bytes(patchedData))
+            self._modified = False
+            self.statusBar().showMessage(f"VOX.DAT compiled: {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Compile Error", str(e))
+
+    def _syncJsonToManager(self, dialogueJson: dict, seqToOffset: dict, manager: dict):
+        """Sync dialogue JSON edits into binary demo objects before patch-in-place compile."""
+        for key, subtitles in dialogueJson.items():
+            offset = seqToOffset.get(key)
+            if not offset:
+                continue
+            demo = manager.get(offset)
+            if demo is None:
+                continue
+            lines = []
+            for seg in demo.segments:
+                if hasattr(seg, 'subtitles'):
+                    lines.extend(seg.subtitles)
+            for idx, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
+                if idx >= len(lines):
+                    break
+                sub = subtitles[startFrame]
+                lines[idx].startFrame    = int(startFrame)
+                lines[idx].displayFrames = int(sub.get("duration", "0"))
+                lines[idx].text          = sub.get("text", "")
+
+    def _syncJsonToDemoManager(self):
+        self._syncJsonToManager(demoDialogueJson, demoSeqToOffset, demoManager)
+
+    def _onModeChanged(self, action: QAction):
+        if action == self.actionDemoMode:
             self._switchToDemoMode()
+        elif action == self.actionVoxMode:
+            self._switchToVoxMode()
+        elif action == self.actionZmovieMode:
+            self._switchToZmovieMode()
         else:
             self._switchToRadioMode()
 
-    def _switchToDemoMode(self):
-        self._editorMode = "demo"
-        # Hide radio-specific widgets
+    _TAB_INDEX = {"radio": 0, "demo": 1, "vox": 2, "zmovie": 3}
+
+    def _onTabChanged(self, index: int):
+        """Called when the user clicks a tab; delegates to the appropriate switch method."""
+        modes = ["radio", "demo", "vox", "zmovie"]
+        if 0 <= index < len(modes):
+            mode = modes[index]
+            if mode != self._editorMode:
+                {"radio": self._switchToRadioMode,
+                 "demo":  self._switchToDemoMode,
+                 "vox":   self._switchToVoxMode,
+                 "zmovie": self._switchToZmovieMode}[mode]()
+
+    def _syncTab(self):
+        """Keep the tab bar in sync with the current editor mode."""
+        idx = self._TAB_INDEX.get(self._editorMode, 0)
+        self._modeTabBar.blockSignals(True)
+        self._modeTabBar.setCurrentIndex(idx)
+        self._modeTabBar.blockSignals(False)
+
+    def _modeData(self) -> tuple:
+        """Return (currentKey, dialogueJson) for the active sequence-based mode."""
+        if self._editorMode == "demo":
+            return currentDemoKey, demoDialogueJson
+        elif self._editorMode == "vox":
+            return currentVoxKey, voxDialogueJson
+        else:  # zmovie
+            return currentZmovieKey, zmovieDialogueJson
+
+    def _hideRadioWidgets(self):
         self.ui.audioCueListView.setVisible(False)
         self.ui.FreqLabel.setVisible(False)
         self.ui.FreqDisplay.setVisible(False)
@@ -760,22 +1397,56 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setVisible(False)
         self.ui.VoxAddressLabel.setVisible(False)
         self.ui.VoxAddressDisplay.setVisible(False)
-        # Update label and enable play if something is loaded
-        self.ui.labelCallOffset.setText("Demo Entry")
-        self.ui.playVoxButton.setEnabled(bool(demoManager))
-        # Repopulate offset list with demo entries
+
+    def _switchToDemoMode(self):
+        self._editorMode = "demo"
+        self.actionDemoMode.setChecked(True)
+        self._syncTab()
+        self._hideRadioWidgets()
+        self.ui.playVoxButton.setEnabled(bool(demoDialogueJson))
         self.ui.offsetListBox.clear()
-        sortedKeys = sorted(demoManager.keys(), key=lambda k: int(k))
-        for i, key in enumerate(sortedKeys):
-            d = demoManager[key]
-            hasDialogue = any(isinstance(s, voxCtl.captionChunk) for s in d.segments)
-            label = f"demo-{i + 1:02}  @ {key}" + (" ✦" if hasDialogue else "")
-            self.ui.offsetListBox.addItem(label, userData=key)
+        for name in sorted(demoDialogueJson.keys()):
+            self.ui.offsetListBox.addItem(name, userData=name)
         self._clearEditor()
         self.ui.subsPreviewList.clear()
+        if self.ui.offsetListBox.count() > 0:
+            self.ui.offsetListBox.setCurrentIndex(0)
+            self._selectDemo(0)
+
+    def _switchToZmovieMode(self):
+        self._editorMode = "zmovie"
+        self.actionZmovieMode.setChecked(True)
+        self._syncTab()
+        self._hideRadioWidgets()
+        self.ui.playVoxButton.setEnabled(False)  # no audio in zmovie mode
+        self.ui.offsetListBox.clear()
+        for name in sorted(zmovieDialogueJson.keys()):
+            self.ui.offsetListBox.addItem(name, userData=name)
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+        if self.ui.offsetListBox.count() > 0:
+            self.ui.offsetListBox.setCurrentIndex(0)
+            self._selectZmovie(0)
+
+    def _switchToVoxMode(self):
+        self._editorMode = "vox"
+        self.actionVoxMode.setChecked(True)
+        self._syncTab()
+        self._hideRadioWidgets()
+        self.ui.playVoxButton.setEnabled(bool(voxDialogueJson))
+        self.ui.offsetListBox.clear()
+        for name in sorted(voxDialogueJson.keys()):
+            self.ui.offsetListBox.addItem(name, userData=name)
+        self._clearEditor()
+        self.ui.subsPreviewList.clear()
+        if self.ui.offsetListBox.count() > 0:
+            self.ui.offsetListBox.setCurrentIndex(0)
+            self._selectVox(0)
 
     def _switchToRadioMode(self):
         self._editorMode = "radio"
+        self.actionRadioMode.setChecked(True)
+        self._syncTab()
         # Restore radio-specific widgets
         self.ui.audioCueListView.setVisible(True)
         self.ui.FreqLabel.setVisible(True)
@@ -784,10 +1455,7 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setVisible(True)
         self.ui.VoxAddressLabel.setVisible(True)
         self.ui.VoxAddressDisplay.setVisible(True)
-        # Restore label
-        self.ui.labelCallOffset.setText("Call (Offset)")
         self.ui.playVoxButton.setEnabled(bool(voxManager))
-        # Repopulate offset list with radio calls
         self.ui.offsetListBox.clear()
         for offset in radioManager.getCallOffsets():
             self.ui.offsetListBox.addItem(offset, userData=offset)
@@ -796,17 +1464,335 @@ class MainWindow(QMainWindow):
         self.ui.audioCueListView.clear()
 
     def _getDemoSubtitleLines(self) -> list:
-        """Return a flat list of dialogueLine objects from the currently selected demo entry."""
-        if not demoManager or not currentDemoKey:
+        """Return a flat list of dialogueLine objects from the currently selected demo entry.
+        Uses the demoSeqToOffset mapping to resolve the raw offset from the sequential name."""
+        offset = demoSeqToOffset.get(currentDemoKey)
+        if not offset or not demoManager:
             return []
-        demo = demoManager.get(currentDemoKey)
+        demo = demoManager.get(offset)
         if demo is None:
             return []
         lines = []
         for seg in demo.segments:
-            if isinstance(seg, voxCtl.captionChunk):
+            if hasattr(seg, 'subtitles'):   # avoids module-identity isinstance issue
                 lines.extend(seg.subtitles)
         return lines
+
+    def _updateDemoSegmentSubtitle(self, idx: int, startFrame: int, displayFrames: int, text: str):
+        """Mirror a JSON edit back into the demoManager dialogueLine for patch-in-place save."""
+        lines = self._getDemoSubtitleLines()
+        if idx < len(lines):
+            lines[idx].startFrame = startFrame
+            lines[idx].displayFrames = displayFrames
+            lines[idx].text = text
+
+
+    # ── Open Folder ───────────────────────────────────────────────────────────
+
+    def openFolder(self):
+        """Scan a folder for RADIO.DAT, DEMO.DAT, VOX.DAT, ZMOVIE.STR and load them all."""
+        folder = QFileDialog.getExistingDirectory(self, "Open Game Data Folder")
+        if not folder:
+            return
+
+        radioPath   = self._findFileInFolder(folder, "RADIO.DAT")
+        demoPath    = self._findFileInFolder(folder, "DEMO.DAT")
+        voxPath     = self._findFileInFolder(folder, "VOX.DAT")
+        zmoviePath  = self._findFileInFolder(folder, "ZMOVIE.STR")
+
+        missing = [n for n, p in [
+            ("RADIO.DAT",  radioPath),
+            ("DEMO.DAT",   demoPath),
+            ("VOX.DAT",    voxPath),
+            ("ZMOVIE.STR", zmoviePath),
+        ] if not p]
+        if missing:
+            QMessageBox.warning(
+                self, "Files Missing",
+                "Could not find the following files in the selected folder:\n"
+                + "\n".join(f"  \u2022 {m}" for m in missing)
+                + "\n\nContinuing with what\u2019s available."
+            )
+        if not radioPath and not demoPath and not voxPath and not zmoviePath:
+            return
+        self._loadAllFromFolder(radioPath, demoPath, voxPath, zmoviePath)
+
+    def _findFileInFolder(self, folder: str, name: str) -> str:
+        """Case-insensitive file search in a folder. Returns full path or empty string."""
+        target = name.lower()
+        try:
+            for f in os.listdir(folder):
+                if f.lower() == target:
+                    return os.path.join(folder, f)
+        except OSError:
+            pass
+        return ""
+
+    def _loadAllFromFolder(self, radioPath: str, demoPath: str, voxPath: str, zmoviePath: str = ""):
+        global projectSettings
+        errors = []
+
+        if radioPath:
+            try:
+                self.statusBar().showMessage("Loading RADIO.DAT\u2026")
+                QApplication.processEvents()
+                self._loadRadioFromPath(radioPath)
+            except Exception as e:
+                errors.append(f"RADIO.DAT: {e}")
+
+        if demoPath:
+            try:
+                self.statusBar().showMessage("Loading DEMO.DAT\u2026")
+                QApplication.processEvents()
+                self._loadDemoFromPath(demoPath)
+            except Exception as e:
+                errors.append(f"DEMO.DAT: {e}")
+
+        if voxPath:
+            try:
+                self.statusBar().showMessage("Loading VOX.DAT\u2026")
+                QApplication.processEvents()
+                self._loadVoxFromPath(voxPath)
+            except Exception as e:
+                errors.append(f"VOX.DAT: {e}")
+
+        if zmoviePath:
+            try:
+                self.statusBar().showMessage("Loading ZMOVIE.STR\u2026")
+                QApplication.processEvents()
+                self._loadZmovieFromPath(zmoviePath)
+            except Exception as e:
+                errors.append(f"ZMOVIE.STR: {e}")
+
+        projectSettings = {
+            "radio_dat_path":   radioPath   or "",
+            "demo_dat_path":    demoPath    or "",
+            "vox_dat_path":     voxPath     or "",
+            "zmovie_str_path":  zmoviePath  or "",
+        }
+
+        if errors:
+            QMessageBox.warning(self, "Load Errors",
+                                "Some files failed to load:\n\n" + "\n".join(errors))
+
+        # Switch to radio mode to show the loaded data
+        if radioManager.radioXMLData is not None:
+            self.actionDemoMode.setChecked(False)
+            self._switchToRadioMode()
+
+        self.statusBar().showMessage(
+            f"Folder loaded — Radio: {'OK' if radioPath else 'missing'}  "
+            f"Demo: {'OK' if demoPath else 'missing'}  "
+            f"VOX: {'OK' if voxPath else 'missing'}  "
+            f"ZMovie: {'OK' if zmoviePath else 'missing'}",
+            8000
+        )
+
+    def _loadRadioFromPath(self, radioPath: str):
+        """Parse RADIO.DAT via RadioDatTools and load the resulting XML."""
+        import RadioDatTools as RDT
+        import xml.etree.ElementTree as ET
+        from xml.dom.minidom import parseString
+
+        # Reset module-level globals so we always get a fresh parse tree
+        RDT.root = ET.Element("RadioData")
+        RDT.elementStack = [(RDT.root, -1)]
+        RDT.radioData = b''
+        RDT.fileSize = 0
+        RDT.offset = 0
+        RDT.callDict = {}
+
+        tmpDir = tempfile.mkdtemp()
+        tmpBase = os.path.join(tmpDir, "radio_parse")
+        try:
+            RDT.setRadioData(radioPath)
+            RDT.radioDict.openRadioFile(radioPath)
+            RDT.root.set('length', str(RDT.fileSize))
+            RDT.analyzeRadioFile(tmpBase)  # builds RDT.root, writes log to tmpDir
+
+            xmlStr = parseString(ET.tostring(RDT.root)).toprettyxml(indent="  ")
+            xmlPath = tmpBase + '.xml'
+            with open(xmlPath, 'w', encoding='utf-8') as xf:
+                xf.write(xmlStr)
+
+            radioManager.loadRadioXmlFile(xmlPath)
+            self.ui.offsetListBox.clear()
+            for offset in radioManager.getCallOffsets():
+                self.ui.offsetListBox.addItem(offset, userData=offset)
+            self.setWindowTitle(f"Dialogue Editor \u2014 {os.path.basename(radioPath)}")
+        finally:
+            shutil.rmtree(tmpDir, ignore_errors=True)
+
+    # ── Project Save ──────────────────────────────────────────────────────────
+
+    def saveProjectAs(self):
+        global projectFilePath
+        filename = QFileDialog.getSaveFileName(
+            self, "Save MTP Project", projectFilePath or "", "MTP Files (*.mtp)"
+        )[0]
+        if not filename:
+            return
+        if not filename.endswith('.mtp'):
+            filename += '.mtp'
+        projectFilePath = filename
+        try:
+            self._writeProjectFile(filename)
+            self.actionSaveProject.setEnabled(True)
+            self._modified = False
+            self.statusBar().showMessage(f"Project saved: {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+
+    def saveProject(self):
+        global projectFilePath
+        if not projectFilePath:
+            self.saveProjectAs()
+        else:
+            try:
+                self._writeProjectFile(projectFilePath)
+                self._modified = False
+                self.statusBar().showMessage(f"Project saved: {projectFilePath}", 5000)
+            except Exception as e:
+                QMessageBox.critical(self, "Save Error", str(e))
+
+    def _writeProjectFile(self, path: str):
+        import xml.etree.ElementTree as ET
+        from xml.dom.minidom import parseString
+        with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr('settings.json', json.dumps(projectSettings, indent=2))
+            if radioManager.radioXMLData is not None:
+                xmlStr = parseString(ET.tostring(radioManager.radioXMLData)).toprettyxml(indent="  ")
+                zf.writestr('radio.xml', xmlStr)
+            if demoDialogueJson:
+                zf.writestr('demo-dialogue.json',
+                            json.dumps(demoDialogueJson, ensure_ascii=False, indent=2))
+            if voxDialogueJson:
+                zf.writestr('vox-dialogue.json',
+                            json.dumps(voxDialogueJson, ensure_ascii=False, indent=2))
+            if zmovieDialogueJson:
+                zf.writestr('zmovie-dialogue.json',
+                            json.dumps(zmovieDialogueJson, ensure_ascii=False, indent=2))
+
+    # ── Project Open ──────────────────────────────────────────────────────────
+
+    def openProject(self):
+        global projectFilePath, projectSettings
+        global demoDialogueJson, demoSeqToOffset
+        global voxDialogueJson, voxSeqToOffset
+        global zmovieDialogueJson
+
+        filename = QFileDialog.getOpenFileName(
+            self, "Open MTP Project", projectFilePath or "", "MTP Files (*.mtp)"
+        )[0]
+        if not filename:
+            return
+
+        try:
+            with zipfile.ZipFile(filename, 'r') as zf:
+                names = zf.namelist()
+                settings = json.loads(zf.read('settings.json'))
+                radioXml = zf.read('radio.xml').decode('utf-8') if 'radio.xml' in names else None
+                demoJson    = json.loads(zf.read('demo-dialogue.json'))    if 'demo-dialogue.json'    in names else {}
+                voxJson     = json.loads(zf.read('vox-dialogue.json'))     if 'vox-dialogue.json'     in names else {}
+                zmovieJson  = json.loads(zf.read('zmovie-dialogue.json'))  if 'zmovie-dialogue.json'  in names else {}
+        except Exception as e:
+            QMessageBox.critical(self, "Open Failed", f"Could not read project file:\n{e}")
+            return
+
+        # Restore radio XML
+        if radioXml:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    suffix='.xml', delete=False, mode='w', encoding='utf-8'
+                ) as tmp:
+                    tmp.write(radioXml)
+                    tmpPath = tmp.name
+                radioManager.loadRadioXmlFile(tmpPath)
+                os.unlink(tmpPath)
+                self.ui.offsetListBox.clear()
+                for offset in radioManager.getCallOffsets():
+                    self.ui.offsetListBox.addItem(offset, userData=offset)
+            except Exception as e:
+                QMessageBox.warning(self, "Radio Load Error", f"Failed to restore radio XML:\n{e}")
+
+        # Restore demo/vox subtitle JSON
+        if demoJson:
+            demoDialogueJson = demoJson
+            demoSeqToOffset  = {k: "" for k in demoJson}  # real offsets filled in by _loadDemoAudioOnly
+        if voxJson:
+            voxDialogueJson = voxJson
+            voxSeqToOffset  = {k: "" for k in voxJson}
+        if zmovieJson:
+            zmovieDialogueJson = zmovieJson
+
+        # Attempt to load audio capability from original DAT paths
+        self._tryLoadAudioManagers(settings)
+
+        projectFilePath = filename
+        projectSettings = settings
+        self.actionSaveProject.setEnabled(True)
+        self._modified = False
+        self.setWindowTitle(f"Dialogue Editor \u2014 {os.path.basename(filename)}")
+        self.statusBar().showMessage(f"Project opened: {filename}", 5000)
+
+        if radioManager.radioXMLData is not None:
+            self.actionDemoMode.setChecked(False)
+            self._switchToRadioMode()
+
+    def _tryLoadAudioManagers(self, settings: dict):
+        """Load audio managers from DAT paths stored in project settings.
+        Prompts the user to relocate a DAT if its stored path no longer exists."""
+        dats = [
+            ("DEMO.DAT", "demo_dat_path", self._loadDemoAudioOnly),
+            ("VOX.DAT",  "vox_dat_path",  self._loadVoxAudioOnly),
+        ]
+        for label, key, loader in dats:
+            stored = settings.get(key, "")
+            if not stored:
+                continue
+            if os.path.exists(stored):
+                try:
+                    loader(stored)
+                except Exception as e:
+                    print(f"Warning: could not load {label} audio: {e}")
+            else:
+                reply = QMessageBox.question(
+                    self, f"{label} Not Found",
+                    f"{label} was not found at:\n{stored}\n\nBrowse for it?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    found = self.openFileDialog("DAT Files (*.DAT *.dat)", f"Locate {label}")
+                    if found:
+                        try:
+                            loader(found)
+                            settings[key] = found
+                        except Exception as e:
+                            QMessageBox.warning(self, f"{label} Load Error", str(e))
+
+    def _loadDemoAudioOnly(self, path: str):
+        """Load demoManager for audio playback without overwriting demoDialogueJson."""
+        global demoManager, demoOriginalData, demoFilePath, demoSeqToOffset
+        demoOriginalData = open(path, 'rb').read()
+        demoFilePath = path
+        demoManager = DM.parseDemoFile(demoOriginalData)
+        sortedOffsets = sorted(demoManager.keys(), key=lambda k: int(k))
+        newSeqMap = {f"demo-{i + 1:02}": off for i, off in enumerate(sortedOffsets)}
+        for k in list(demoSeqToOffset.keys()):
+            if k in newSeqMap:
+                demoSeqToOffset[k] = newSeqMap[k]
+
+    def _loadVoxAudioOnly(self, path: str):
+        """Load voxManager for audio playback without overwriting voxDialogueJson."""
+        global voxManager, voxOriginalData, voxFilePath, voxSeqToOffset
+        voxOriginalData = open(path, 'rb').read()
+        voxFilePath = path
+        voxManager = DM.parseDemoFile(voxOriginalData)
+        sortedOffsets = sorted(voxManager.keys(), key=lambda k: int(k))
+        newSeqMap = {f"vox-{i + 1:04}": off for i, off in enumerate(sortedOffsets)}
+        for k in list(voxSeqToOffset.keys()):
+            if k in newSeqMap:
+                voxSeqToOffset[k] = newSeqMap[k]
 
 
 if __name__ == "__main__":

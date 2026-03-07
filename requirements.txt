@@ -1,2 +1,3 @@
 PySide6
-ProgressBartomlkit
+ffmpeg-python
+progressbar2
