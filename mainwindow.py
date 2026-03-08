@@ -343,8 +343,7 @@ class MainWindow(QMainWindow):
         self.ui.actionLoad_Radio_XML.triggered.connect(self.loadRadioXMLFile)
         self.ui.actionLoad_Radio_XML.setStatusTip("Load a RADIO.XML file")
         self.ui.actionLoad_VOX_DAT.triggered.connect(self.loadVoxData)
-        self.ui.actionSave_RADIO_DAT.triggered.connect(self.saveRadioDatFile)
-        self.ui.actionSave_RADIO_DAT.setStatusTip("Recompile RADIO.DAT from current XML")
+        self.ui.menuFile.removeAction(self.ui.actionSave_RADIO_DAT)
         self.ui.actionSave_RADIO_XML.triggered.connect(self.saveRadioXMLFile)
         self.ui.actionSave_RADIO_XML.setStatusTip("Save current edits to RADIO.XML")
 
@@ -399,20 +398,10 @@ class MainWindow(QMainWindow):
         self.actionExport_DEMO_JSON.triggered.connect(self.exportDemoJson)
         self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_DEMO_JSON)
 
-        self.actionCompile_DEMO_DAT = QAction("Compile DEMO.DAT...", self)
-        self.actionCompile_DEMO_DAT.setStatusTip("Compile JSON edits into a new DEMO.DAT binary")
-        self.actionCompile_DEMO_DAT.triggered.connect(self.compileDemoDatFile)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_DEMO_DAT)
-
         self.actionExport_VOX_JSON = QAction("Export VOX JSON...", self)
         self.actionExport_VOX_JSON.setStatusTip("Save VOX subtitle edits to a JSON file")
         self.actionExport_VOX_JSON.triggered.connect(self.exportVoxJson)
         self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_VOX_JSON)
-
-        self.actionCompile_VOX_DAT = QAction("Compile VOX.DAT...", self)
-        self.actionCompile_VOX_DAT.setStatusTip("Compile VOX JSON edits into a new VOX.DAT binary")
-        self.actionCompile_VOX_DAT.triggered.connect(self.compileVoxDatFile)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_VOX_DAT)
 
         self.actionLoad_ZMOVIE = QAction("Load ZMOVIE.STR...", self)
         self.actionLoad_ZMOVIE.setStatusTip("Load a ZMOVIE.STR file for subtitle editing")
@@ -424,16 +413,46 @@ class MainWindow(QMainWindow):
         self.actionExport_ZMOVIE_JSON.triggered.connect(self.exportZmovieJson)
         self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_ZMOVIE_JSON)
 
-        self.actionCompile_ZMOVIE = QAction("Compile ZMOVIE.STR...", self)
-        self.actionCompile_ZMOVIE.setStatusTip("Compile ZMovie JSON edits into a new ZMOVIE.STR")
-        self.actionCompile_ZMOVIE.triggered.connect(self.compileZmovieFile)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionCompile_ZMOVIE)
+        # ── Bottom of File menu: Open shortcuts, Finalize, then Quit ─────
+        self.ui.menuFile.insertSeparator(self.ui.actionQuit)
 
-        self.ui.menuFile.insertSeparator(self.actionSave_VOX_DAT)
+        actionOpenFolderBottom = QAction("Open Folder...", self)
+        actionOpenFolderBottom.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, and VOX.DAT from a folder")
+        actionOpenFolderBottom.triggered.connect(self.openFolder)
+        self.ui.menuFile.insertAction(self.ui.actionQuit, actionOpenFolderBottom)
+
+        actionOpenProjectBottom = QAction("Open Project (.mtp)...", self)
+        actionOpenProjectBottom.setStatusTip("Open a saved MTP project file")
+        actionOpenProjectBottom.triggered.connect(self.openProject)
+        self.ui.menuFile.insertAction(self.ui.actionQuit, actionOpenProjectBottom)
+
         self.actionFinalizeProject = QAction("Finalize Project...", self)
         self.actionFinalizeProject.setStatusTip("Batch-compile all game data files")
         self.actionFinalizeProject.triggered.connect(self.finalizeProject)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionFinalizeProject)
+        self.ui.menuFile.insertAction(self.ui.actionQuit, self.actionFinalizeProject)
+
+        self.ui.menuFile.insertSeparator(self.ui.actionQuit)
+
+        # ── Bottom-right GUI buttons (above Quit) ────────────────────────────
+        from PySide6.QtWidgets import QFrame
+        quitIdx = self.ui.verticalLayout_4.indexOf(self.ui.quitButton)
+
+        btnOpenFolder = QPushButton("Open Folder...")
+        btnOpenFolder.clicked.connect(self.openFolder)
+        self.ui.verticalLayout_4.insertWidget(quitIdx, btnOpenFolder)
+
+        btnOpenProject = QPushButton("Open Project (.mtp)...")
+        btnOpenProject.clicked.connect(self.openProject)
+        self.ui.verticalLayout_4.insertWidget(quitIdx + 1, btnOpenProject)
+
+        btnFinalize = QPushButton("Finalize Project...")
+        btnFinalize.clicked.connect(self.finalizeProject)
+        self.ui.verticalLayout_4.insertWidget(quitIdx + 2, btnFinalize)
+
+        separatorLine = QFrame()
+        separatorLine.setFrameShape(QFrame.HLine)
+        separatorLine.setFrameShadow(QFrame.Sunken)
+        self.ui.verticalLayout_4.insertWidget(quitIdx + 3, separatorLine)
 
         # ── View menu (4 mutually exclusive mode actions) ─────────────────────
         from PySide6.QtGui import QActionGroup
