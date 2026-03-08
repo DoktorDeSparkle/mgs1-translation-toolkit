@@ -50,6 +50,10 @@ zmovieOriginalData: bytes = b''  # original ZMOVIE.STR bytes for patch-in-place 
 zmovieFilePath:     str   = ""
 currentZmovieKey:   str   = ""   # e.g. "zmovie-00"
 
+# Radio/VOX cross-reference index (built when RADIO XML loads)
+_radioDisc2Offsets:    set = set()  # call offsets where any VOX_CUES has a zero block address
+_radioClaimedVoxAddrs: set = set()  # VOX byte addresses claimed by any RADIO call (non-zero only)
+
 # Project state
 projectSettings: dict = {}     # {"radio_dat_path": ..., "demo_dat_path": ..., "vox_dat_path": ...}
 projectFilePath: str  = ""     # path to the currently-open .mtp file (empty if unsaved)
@@ -358,6 +362,21 @@ class MainWindow(QMainWindow):
         # ── Edit buttons (added programmatically) ────────────────────────────
         self._addEditButtons()
 
+        # ── Offset list filter checkboxes (inserted above offsetListBox) ──────
+        labelIdx = self.ui.verticalLayout.indexOf(self.ui.labelCallOffset)
+
+        self.chkDisc1Only = QCheckBox("Disc 1 only (hide disc 2 calls)")
+        self.chkDisc1Only.setChecked(False)
+        self.chkDisc1Only.setVisible(False)
+        self.chkDisc1Only.toggled.connect(self._populateRadioOffsets)
+        self.ui.verticalLayout.insertWidget(labelIdx + 2, self.chkDisc1Only)
+
+        self.chkUnclaimedVox = QCheckBox("Show unclaimed clips only")
+        self.chkUnclaimedVox.setChecked(False)
+        self.chkUnclaimedVox.setVisible(False)
+        self.chkUnclaimedVox.toggled.connect(self._populateVoxOffsets)
+        self.ui.verticalLayout.insertWidget(labelIdx + 3, self.chkUnclaimedVox)
+
         # ── Project actions (top of File menu) ───────────────────────────────
         self.actionOpenFolder = QAction("Open Folder...", self)
         self.actionOpenFolder.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, and VOX.DAT from a folder")
@@ -588,10 +607,60 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         radioManager.loadRadioXmlFile(filename)
+        self._buildRadioVoxIndex()
+        self._populateRadioOffsets()
+        self.setWindowTitle(f"Dialogue Editor — {os.path.basename(filename)}")
+
+    def _buildRadioVoxIndex(self):
+        """Scan all RADIO calls and build the disc-2 and claimed-VOX index sets."""
+        global _radioDisc2Offsets, _radioClaimedVoxAddrs
+        _radioDisc2Offsets    = set()
+        _radioClaimedVoxAddrs = set()
+        if not radioManager.radioXMLData:
+            return
+        for call in radioManager.calls:
+            callOffset = call.get("offset", "")
+            for vox in call.findall(".//VOX_CUES"):
+                content = vox.get("content", "")
+                if len(content) < 16:
+                    continue
+                blockHex = content[8:16]
+                byteAddr = int.from_bytes(bytes.fromhex(blockHex), byteorder="big") * 0x800
+                if byteAddr == 0:
+                    _radioDisc2Offsets.add(callOffset)
+                else:
+                    _radioClaimedVoxAddrs.add(byteAddr)
+
+    def _populateRadioOffsets(self):
+        """Repopulate the Radio offset list, optionally hiding disc-2 calls."""
+        filterDisc2 = self.chkDisc1Only.isChecked()
+        current = self.ui.offsetListBox.currentData()
+        self.ui.offsetListBox.blockSignals(True)
         self.ui.offsetListBox.clear()
         for offset in radioManager.getCallOffsets():
+            if filterDisc2 and offset in _radioDisc2Offsets:
+                continue
             self.ui.offsetListBox.addItem(offset, userData=offset)
-        self.setWindowTitle(f"Dialogue Editor — {os.path.basename(filename)}")
+        self.ui.offsetListBox.blockSignals(False)
+        # Restore selection if still present, else select first
+        idx = self.ui.offsetListBox.findData(current)
+        self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
+
+    def _populateVoxOffsets(self):
+        """Repopulate the VOX offset list, optionally showing only unclaimed clips."""
+        filterUnclaimed = self.chkUnclaimedVox.isChecked()
+        current = self.ui.offsetListBox.currentData()
+        self.ui.offsetListBox.blockSignals(True)
+        self.ui.offsetListBox.clear()
+        for name in sorted(voxDialogueJson.keys()):
+            if filterUnclaimed:
+                offset = voxSeqToOffset.get(name)
+                if offset and int(offset) in _radioClaimedVoxAddrs:
+                    continue
+            self.ui.offsetListBox.addItem(name, userData=name)
+        self.ui.offsetListBox.blockSignals(False)
+        idx = self.ui.offsetListBox.findData(current)
+        self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
 
     def loadVoxData(self):
         voxFile = self.openFileDialog("DAT Files (*.DAT *.dat)", "Load VOX.DAT")
@@ -1773,9 +1842,9 @@ class MainWindow(QMainWindow):
         self._syncTab()
         self._hideRadioWidgets()
         self.ui.playVoxButton.setEnabled(bool(voxDialogueJson))
-        self.ui.offsetListBox.clear()
-        for name in sorted(voxDialogueJson.keys()):
-            self.ui.offsetListBox.addItem(name, userData=name)
+        self.chkDisc1Only.setVisible(False)
+        self.chkUnclaimedVox.setVisible(bool(_radioClaimedVoxAddrs))
+        self._populateVoxOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         if self.ui.offsetListBox.count() > 0:
@@ -1795,9 +1864,9 @@ class MainWindow(QMainWindow):
         self.ui.VoxAddressLabel.setVisible(True)
         self.ui.VoxAddressDisplay.setVisible(True)
         self.ui.playVoxButton.setEnabled(bool(voxManager))
-        self.ui.offsetListBox.clear()
-        for offset in radioManager.getCallOffsets():
-            self.ui.offsetListBox.addItem(offset, userData=offset)
+        self.chkUnclaimedVox.setVisible(False)
+        self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
+        self._populateRadioOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         self.ui.audioCueListView.clear()
@@ -1955,9 +2024,8 @@ class MainWindow(QMainWindow):
                 xf.write(xmlStr)
 
             radioManager.loadRadioXmlFile(xmlPath)
-            self.ui.offsetListBox.clear()
-            for offset in radioManager.getCallOffsets():
-                self.ui.offsetListBox.addItem(offset, userData=offset)
+            self._buildRadioVoxIndex()
+            self._populateRadioOffsets()
             self.setWindowTitle(f"Dialogue Editor \u2014 {os.path.basename(radioPath)}")
         finally:
             shutil.rmtree(tmpDir, ignore_errors=True)
@@ -2048,9 +2116,8 @@ class MainWindow(QMainWindow):
                     tmpPath = tmp.name
                 radioManager.loadRadioXmlFile(tmpPath)
                 os.unlink(tmpPath)
-                self.ui.offsetListBox.clear()
-                for offset in radioManager.getCallOffsets():
-                    self.ui.offsetListBox.addItem(offset, userData=offset)
+                self._buildRadioVoxIndex()
+                self._populateRadioOffsets()
             except Exception as e:
                 QMessageBox.warning(self, "Radio Load Error", f"Failed to restore radio XML:\n{e}")
 
