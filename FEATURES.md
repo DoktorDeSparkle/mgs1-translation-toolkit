@@ -57,10 +57,6 @@
 
 ## Planned / Wishlist
 
-2. **VOX uniqueness scanner** — scan VOX.DAT entries and flag clips that do not appear in any RADIO.DAT VOX_CUES offset reference, i.e. audio that exists only in VOX and has no codec call counterpart.
+1. **mkpsxiso integration** — after Finalize Project, optionally run mkpsxiso to produce a test ISO directly from the app, and launch it in DuckStation for immediate playback testing.
 
-3. **Disc 2 call filter (Radio Mode)** — scan all Radio calls and grey out / disable editing for any call whose VOX offset is `0000`, indicating the audio is on Disc 2 and unavailable for subtitle injection.
-
-4. **mkpsxiso integration** — after Finalize Project, optionally run mkpsxiso to produce a test ISO directly from the app, and launch it in DuckStation for immediate playback testing.
-
-5. **ZMovie audio playback** — play the STR video stream alongside subtitle preview in ZMovie Mode, so timing edits can be verified against the actual FMV cutscene.
+2. **ZMovie audio playback** — play the STR video stream alongside subtitle preview in ZMovie Mode, so timing edits can be verified against the actual FMV cutscene.
