@@ -365,7 +365,7 @@ class MainWindow(QMainWindow):
         # ── Offset list filter checkboxes (inserted above offsetListBox) ──────
         labelIdx = self.ui.verticalLayout.indexOf(self.ui.labelCallOffset)
 
-        self.chkDisc1Only = QCheckBox("Disc 1 only (hide disc 2 calls)")
+        self.chkDisc1Only = QCheckBox("This disc only (hide missing audio)")
         self.chkDisc1Only.setChecked(False)
         self.chkDisc1Only.setVisible(False)
         self.chkDisc1Only.toggled.connect(self._populateRadioOffsets)
