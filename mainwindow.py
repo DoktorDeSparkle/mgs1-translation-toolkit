@@ -58,6 +58,10 @@ _radioClaimedVoxAddrs: set = set()  # VOX byte addresses claimed by any RADIO ca
 projectSettings: dict = {}     # {"radio_dat_path": ..., "demo_dat_path": ..., "vox_dat_path": ...}
 projectFilePath: str  = ""     # path to the currently-open .mtp file (empty if unsaved)
 
+# Font table state
+activeTblMapping: dict = {}    # hex code -> character mapping from .tbl
+activeTblRaw:     str  = ""    # raw .tbl file content for project save
+
 # ── Subtitle preview tuning ───────────────────────────────────────────────────
 # SUBTITLE_FPS: the frame rate the game uses for subtitle timing values.
 #   Increase → subtitles advance slower (if they're running too fast)
@@ -332,6 +336,339 @@ class FinalizeProjectDialog(QDialog):
     def replaceOriginals(self): return self.chkReplace.isChecked()
 
 
+class FontEditorDialog(QDialog):
+    """Dialog for extracting, editing, and injecting 12x12 kana/kanji font glyphs."""
+
+    COLS = 22  # grid columns
+    SCALE = 4  # display scale (12px -> 48px)
+
+    def __init__(self, tblMapping=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Font Editor")
+        self.setMinimumSize(900, 600)
+
+        from scripts.fontTools import mgsFontTools as MFT
+        from scripts.fontTools import tblTools
+        self._MFT = MFT
+        self._tblTools = tblTools
+
+        self._glyphs: list[bytes] = []         # 440 x 36-byte glyph data
+        self._tblMapping: dict[str, str] = tblMapping or tblTools.generateDefaultTbl()
+        self._modifiedSlots: set[int] = set()
+        self._selectedSlot: int = -1
+        self._stageDirPath: str = ""
+        self._glyphButtons: list[QPushButton] = []
+
+        self._buildUI()
+
+    def _buildUI(self):
+        from PySide6.QtWidgets import (QScrollArea, QWidget, QGridLayout,
+            QSplitter, QFrame, QSpinBox, QSizePolicy)
+        from PySide6.QtGui import QPixmap, QImage
+
+        mainLayout = QVBoxLayout(self)
+
+        # ── Top bar ──────────────────────────────────────────────────────
+        topRow = QHBoxLayout()
+        self.btnLoadStageDir = QPushButton("Load STAGE.DIR...")
+        self.btnLoadStageDir.clicked.connect(self._loadStageDir)
+        topRow.addWidget(self.btnLoadStageDir)
+        self.btnLoadTbl = QPushButton("Load .tbl...")
+        self.btnLoadTbl.clicked.connect(self._loadTbl)
+        topRow.addWidget(self.btnLoadTbl)
+        self.btnSaveTbl = QPushButton("Save .tbl...")
+        self.btnSaveTbl.clicked.connect(self._saveTbl)
+        topRow.addWidget(self.btnSaveTbl)
+        topRow.addStretch()
+        mainLayout.addLayout(topRow)
+
+        # ── Splitter: grid on left, detail panel on right ────────────────
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Grid
+        scrollArea = QScrollArea()
+        scrollArea.setWidgetResizable(True)
+        gridWidget = QWidget()
+        self._gridLayout = QGridLayout(gridWidget)
+        self._gridLayout.setSpacing(2)
+        scrollArea.setWidget(gridWidget)
+        splitter.addWidget(scrollArea)
+
+        # Detail panel
+        detailWidget = QWidget()
+        detailWidget.setFixedWidth(220)
+        detailLayout = QVBoxLayout(detailWidget)
+
+        self._previewLabel = QLabel()
+        self._previewLabel.setFixedSize(120, 120)
+        self._previewLabel.setAlignment(Qt.AlignCenter)
+        self._previewLabel.setStyleSheet("border: 1px solid #555; background: black;")
+        detailLayout.addWidget(self._previewLabel, alignment=Qt.AlignCenter)
+
+        self._slotLabel = QLabel("Slot: —")
+        detailLayout.addWidget(self._slotLabel)
+        self._hexLabel = QLabel("Hex: —")
+        detailLayout.addWidget(self._hexLabel)
+
+        charRow = QHBoxLayout()
+        charRow.addWidget(QLabel("Char:"))
+        self._charEdit = QLineEdit()
+        self._charEdit.setMaxLength(2)
+        self._charEdit.setFixedWidth(60)
+        self._charEdit.editingFinished.connect(self._onCharEdited)
+        charRow.addWidget(self._charEdit)
+        charRow.addStretch()
+        detailLayout.addLayout(charRow)
+
+        self.btnImportPng = QPushButton("Import PNG...")
+        self.btnImportPng.clicked.connect(self._importSinglePng)
+        detailLayout.addWidget(self.btnImportPng)
+        self.btnExportPng = QPushButton("Export PNG...")
+        self.btnExportPng.clicked.connect(self._exportSinglePng)
+        detailLayout.addWidget(self.btnExportPng)
+
+        detailLayout.addStretch()
+        splitter.addWidget(detailWidget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        mainLayout.addWidget(splitter)
+
+        # ── Bottom bar ───────────────────────────────────────────────────
+        bottomRow = QHBoxLayout()
+        btnExportAll = QPushButton("Export All Glyphs...")
+        btnExportAll.clicked.connect(self._exportAll)
+        bottomRow.addWidget(btnExportAll)
+        btnImportFolder = QPushButton("Import Glyphs from Folder...")
+        btnImportFolder.clicked.connect(self._importFolder)
+        bottomRow.addWidget(btnImportFolder)
+        bottomRow.addStretch()
+        self.btnApply = QPushButton("Apply to STAGE.DIR...")
+        self.btnApply.clicked.connect(self._applyToStageDir)
+        self.btnApply.setEnabled(False)
+        bottomRow.addWidget(self.btnApply)
+        mainLayout.addLayout(bottomRow)
+
+        # Build empty grid placeholders
+        self._buildGrid()
+
+    def _buildGrid(self):
+        from PySide6.QtGui import QPixmap, QImage, QIcon
+        from PySide6.QtCore import QSize
+
+        self._glyphButtons.clear()
+        cellSize = 12 * self.SCALE + 8  # 56px
+
+        for i in range(self._MFT.GLYPH_COUNT):
+            btn = QPushButton()
+            btn.setFixedSize(cellSize, cellSize)
+            btn.setToolTip(f"Slot {i}")
+            btn.setProperty("slotIndex", i)
+            btn.clicked.connect(lambda checked=False, idx=i: self._selectSlot(idx))
+            row, col = divmod(i, self.COLS)
+            self._gridLayout.addWidget(btn, row, col)
+            self._glyphButtons.append(btn)
+
+    def _refreshGrid(self):
+        from PySide6.QtGui import QPixmap, QImage, QIcon
+        from PySide6.QtCore import QSize
+
+        iconSize = 12 * self.SCALE
+        for i, btn in enumerate(self._glyphButtons):
+            if i < len(self._glyphs):
+                img = self._glyphToQImage(self._glyphs[i])
+                scaled = img.scaled(iconSize, iconSize, Qt.KeepAspectRatio, Qt.FastTransformation)
+                btn.setIcon(QIcon(QPixmap.fromImage(scaled)))
+                btn.setIconSize(QSize(iconSize, iconSize))
+
+            hexCode = self._tblTools.slotToHexCode(i)
+            char = self._tblMapping.get(hexCode, "")
+            btn.setToolTip(f"Slot {i} [{hexCode}] {char}")
+
+            if i in self._modifiedSlots:
+                btn.setStyleSheet("border: 2px solid #44aaff;")
+            else:
+                btn.setStyleSheet("")
+
+    def _glyphToQImage(self, data: bytes):
+        from PySide6.QtGui import QImage
+        pixels = self._MFT.glyphToPixels(data)
+        img = QImage(12, 12, QImage.Format_Grayscale8)
+        for y, row in enumerate(pixels):
+            for x, val in enumerate(row):
+                gray = self._MFT.PALETTE[val]
+                img.setPixelColor(x, y, QColor(gray, gray, gray))
+        return img
+
+    def _selectSlot(self, idx):
+        from PySide6.QtGui import QPixmap
+        self._selectedSlot = idx
+        hexCode = self._tblTools.slotToHexCode(idx)
+        char = self._tblMapping.get(hexCode, "")
+
+        self._slotLabel.setText(f"Slot: {idx}")
+        self._hexLabel.setText(f"Hex: {hexCode}")
+        self._charEdit.setText(char)
+
+        if idx < len(self._glyphs):
+            img = self._glyphToQImage(self._glyphs[idx])
+            scaled = img.scaled(120, 120, Qt.KeepAspectRatio, Qt.FastTransformation)
+            self._previewLabel.setPixmap(QPixmap.fromImage(scaled))
+
+        # Highlight selected button
+        for i, btn in enumerate(self._glyphButtons):
+            if i == idx:
+                btn.setStyleSheet("border: 2px solid #ffaa00;")
+            elif i in self._modifiedSlots:
+                btn.setStyleSheet("border: 2px solid #44aaff;")
+            else:
+                btn.setStyleSheet("")
+
+    def _onCharEdited(self):
+        if self._selectedSlot < 0:
+            return
+        hexCode = self._tblTools.slotToHexCode(self._selectedSlot)
+        newChar = self._charEdit.text()
+        if newChar:
+            self._tblMapping[hexCode] = newChar
+        elif hexCode in self._tblMapping:
+            del self._tblMapping[hexCode]
+
+    # ── File operations ──────────────────────────────────────────────────
+
+    def _loadStageDir(self):
+        path = QFileDialog.getOpenFileName(
+            self, "Select STAGE.DIR", self._stageDirPath,
+            "DIR Files (*.DIR *.dir);;All Files (*)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._glyphs = self._MFT.extractGlyphs(path)
+            self._stageDirPath = path
+            self._modifiedSlots.clear()
+            self._refreshGrid()
+            self.btnApply.setEnabled(True)
+            if self._selectedSlot >= 0:
+                self._selectSlot(self._selectedSlot)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load font from STAGE.DIR:\n{e}")
+
+    def _loadTbl(self):
+        path = QFileDialog.getOpenFileName(
+            self, "Load Table File", "", "Table Files (*.tbl);;All Files (*)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._tblMapping = self._tblTools.loadTbl(path)
+            self._refreshGrid()
+            if self._selectedSlot >= 0:
+                self._selectSlot(self._selectedSlot)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load .tbl file:\n{e}")
+
+    def _saveTbl(self):
+        path = QFileDialog.getSaveFileName(
+            self, "Save Table File", "font.tbl", "Table Files (*.tbl);;All Files (*)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._tblTools.saveTbl(path, self._tblMapping)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save .tbl file:\n{e}")
+
+    def _importSinglePng(self):
+        if self._selectedSlot < 0 or not self._glyphs:
+            QMessageBox.information(self, "No Selection", "Load a STAGE.DIR and select a glyph slot first.")
+            return
+        path = QFileDialog.getOpenFileName(
+            self, "Import PNG", "", "PNG Files (*.png);;All Files (*)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._glyphs[self._selectedSlot] = self._MFT.pngToGlyph(path)
+            self._modifiedSlots.add(self._selectedSlot)
+            self._refreshGrid()
+            self._selectSlot(self._selectedSlot)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import PNG:\n{e}")
+
+    def _exportSinglePng(self):
+        if self._selectedSlot < 0 or not self._glyphs:
+            QMessageBox.information(self, "No Selection", "Load a STAGE.DIR and select a glyph slot first.")
+            return
+        path = QFileDialog.getSaveFileName(
+            self, "Export PNG", f"glyph-{self._selectedSlot:03d}.png", "PNG Files (*.png)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._MFT.glyphToPng(self._glyphs[self._selectedSlot], path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export PNG:\n{e}")
+
+    def _exportAll(self):
+        if not self._glyphs:
+            QMessageBox.information(self, "No Data", "Load a STAGE.DIR first.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Export All Glyphs To")
+        if not folder:
+            return
+        try:
+            for i, glyph in enumerate(self._glyphs):
+                self._MFT.glyphToPng(glyph, os.path.join(folder, f"glyph-{i:03d}.png"))
+            QMessageBox.information(self, "Done", f"Exported {len(self._glyphs)} glyphs to:\n{folder}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export glyphs:\n{e}")
+
+    def _importFolder(self):
+        if not self._glyphs:
+            QMessageBox.information(self, "No Data", "Load a STAGE.DIR first to establish baseline glyphs.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Import Glyphs From Folder")
+        if not folder:
+            return
+        try:
+            imported = self._MFT.importGlyphsFromFolder(folder)
+            for idx, data in imported.items():
+                self._glyphs[idx] = data
+                self._modifiedSlots.add(idx)
+            self._refreshGrid()
+            QMessageBox.information(self, "Done", f"Imported {len(imported)} glyphs.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import glyphs:\n{e}")
+
+    def _applyToStageDir(self):
+        if not self._glyphs:
+            return
+        path = QFileDialog.getSaveFileName(
+            self, "Save Modified STAGE.DIR",
+            self._stageDirPath or "STAGE.DIR",
+            "DIR Files (*.DIR *.dir);;All Files (*)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._MFT.injectGlyphs(self._stageDirPath, path, self._glyphs)
+            self._modifiedSlots.clear()
+            self._refreshGrid()
+            QMessageBox.information(self, "Done", f"Font injected into:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to inject font:\n{e}")
+
+    # ── Public accessors for MainWindow integration ──────────────────────
+
+    @property
+    def tblMapping(self) -> dict[str, str]:
+        return self._tblMapping
+
+    @property
+    def tblRaw(self) -> str:
+        return self._tblTools.tblToString(self._tblMapping)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -505,6 +842,13 @@ class MainWindow(QMainWindow):
         viewMenu.addAction(self.actionZmovieMode)
 
         self._modeGroup.triggered.connect(self._onModeChanged)
+
+        # ── Tools menu ──────────────────────────────────────────────────────
+        toolsMenu = self.menuBar().addMenu("Tools")
+        self.actionFontEditor = QAction("Font Editor...", self)
+        self.actionFontEditor.setStatusTip("Extract, edit, and inject game font glyphs")
+        self.actionFontEditor.triggered.connect(self._openFontEditor)
+        toolsMenu.addAction(self.actionFontEditor)
 
         # ── Mode tab bar ───────────────────────────────────────────────────────
         from PySide6.QtWidgets import QToolBar, QTabBar
@@ -1564,6 +1908,23 @@ class MainWindow(QMainWindow):
     def _syncJsonToDemoManager(self):
         self._syncJsonToManager(demoDialogueJson, demoSeqToOffset, demoManager)
 
+    def _openFontEditor(self):
+        """Open the Font Editor dialog."""
+        global activeTblMapping, activeTblRaw
+        import scripts.translation.radioDict as RD
+
+        dlg = FontEditorDialog(tblMapping=activeTblMapping or None, parent=self)
+        dlg.exec()
+
+        # Update the active .tbl mapping from the dialog
+        activeTblMapping = dlg.tblMapping
+        activeTblRaw = dlg.tblRaw
+
+        # Push overrides to the encoder
+        from scripts.fontTools import tblTools
+        overrides = tblTools.tblToEncoderOverrides(activeTblMapping)
+        RD.tblEncoderOverrides = overrides
+
     def finalizeProject(self):
         """Batch-compile all (or selected) game data files."""
         from argparse import Namespace
@@ -2079,6 +2440,8 @@ class MainWindow(QMainWindow):
             if zmovieDialogueJson:
                 zf.writestr('zmovie-dialogue.json',
                             json.dumps(zmovieDialogueJson, ensure_ascii=False, indent=2))
+            if activeTblRaw:
+                zf.writestr('font.tbl', activeTblRaw)
 
     # ── Project Open ──────────────────────────────────────────────────────────
 
@@ -2087,6 +2450,7 @@ class MainWindow(QMainWindow):
         global demoDialogueJson, demoSeqToOffset
         global voxDialogueJson, voxSeqToOffset
         global zmovieDialogueJson
+        global activeTblMapping, activeTblRaw
 
         filename = QFileDialog.getOpenFileName(
             self, "Open MTP Project", projectFilePath or "", "MTP Files (*.mtp)"
@@ -2102,6 +2466,7 @@ class MainWindow(QMainWindow):
                 demoJson    = json.loads(zf.read('demo-dialogue.json'))    if 'demo-dialogue.json'    in names else {}
                 voxJson     = json.loads(zf.read('vox-dialogue.json'))     if 'vox-dialogue.json'     in names else {}
                 zmovieJson  = json.loads(zf.read('zmovie-dialogue.json'))  if 'zmovie-dialogue.json'  in names else {}
+                tblRaw      = zf.read('font.tbl').decode('utf-8')          if 'font.tbl'              in names else ""
         except Exception as e:
             QMessageBox.critical(self, "Open Failed", f"Could not read project file:\n{e}")
             return
@@ -2130,6 +2495,14 @@ class MainWindow(QMainWindow):
             voxSeqToOffset  = {k: "" for k in voxJson}
         if zmovieJson:
             zmovieDialogueJson = zmovieJson
+
+        # Restore font table overrides
+        if tblRaw:
+            from scripts.fontTools import tblTools
+            import scripts.translation.radioDict as RD
+            activeTblRaw = tblRaw
+            activeTblMapping = tblTools.loadTblFromString(tblRaw)
+            RD.tblEncoderOverrides = tblTools.tblToEncoderOverrides(activeTblMapping)
 
         # Attempt to load audio capability from original DAT paths
         self._tryLoadAudioManagers(settings)
