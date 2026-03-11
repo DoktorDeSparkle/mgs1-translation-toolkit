@@ -4,9 +4,12 @@ import sys, os, zipfile, json, tempfile, importlib, shutil
 from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
-    QGroupBox, QCheckBox, QLineEdit, QFormLayout)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer
+    QGroupBox, QCheckBox, QLineEdit, QFormLayout,
+    QFrame)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl
 from PySide6.QtGui import QFont, QColor, QAction
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from ui_form import Ui_MainWindow
 
@@ -189,6 +192,55 @@ class FfplayThread(QThread):
                 self.errorOccurred.emit(f"ffplay exited with code {ret}")
         except FileNotFoundError:
             self.errorOccurred.emit("ffplay not found — is FFmpeg installed and on PATH?")
+        except Exception as e:
+            self.errorOccurred.emit(str(e))
+
+
+class ZmovieConversionThread(QThread):
+    """
+    Extracts a zmovie entry from ZMOVIE.STR as a raw PSX STR file, then
+    converts it to MP4 via ffmpeg for playback in QMediaPlayer.
+    Emits conversionDone(mp4Path) when ready.
+    """
+    conversionDone = Signal(str)
+    errorOccurred  = Signal(str)
+
+    def __init__(self, zmovieData: bytes, entryIndex: int, parent=None):
+        super().__init__(parent)
+        self._zmovieData = zmovieData
+        self._entryIndex = entryIndex
+        self._proc = None
+
+    def killSubprocess(self):
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+
+    def run(self):
+        import subprocess, tempfile
+        from scripts.zmovieTools import extractZmovie as ZM
+
+        try:
+            strPath = os.path.join(tempfile.gettempdir(), f"mgs_zmovie_{self._entryIndex}.str")
+            mp4Path = os.path.join(tempfile.gettempdir(), f"mgs_zmovie_{self._entryIndex}.mp4")
+
+            ZM.extractEntryVideo(self._zmovieData, self._entryIndex, strPath)
+
+            cmd = ['ffmpeg', '-y', '-i', strPath, mp4Path]
+            self._proc = subprocess.Popen(cmd,
+                                          stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL)
+            ret = self._proc.wait()
+            self._proc = None
+
+            if self.isInterruptionRequested():
+                return
+            if ret == 0:
+                self.conversionDone.emit(mp4Path)
+            else:
+                self.errorOccurred.emit(f"ffmpeg exited with code {ret}")
+        except FileNotFoundError:
+            self.errorOccurred.emit("ffmpeg not found — is FFmpeg installed and on PATH?")
         except Exception as e:
             self.errorOccurred.emit(str(e))
 
@@ -1459,7 +1511,9 @@ class MainWindow(QMainWindow):
     # ── Audio ─────────────────────────────────────────────────────────────────
 
     def playVoxFile(self):
-        if self._editorMode == "demo":
+        if self._editorMode == "zmovie":
+            return self._playZmovieVideo()
+        elif self._editorMode == "demo":
             offset = demoSeqToOffset.get(currentDemoKey)
             if not offset or not demoManager:
                 self.statusBar().showMessage("No demo entry selected.", 3000)
@@ -1536,7 +1590,12 @@ class MainWindow(QMainWindow):
             self._playThread.killSubprocess()
             self._playThread.requestInterruption()
             self._playThread.wait(1000)
+        if self._zmovieConvThread and self._zmovieConvThread.isRunning():
+            self._zmovieConvThread.killSubprocess()
+            self._zmovieConvThread.requestInterruption()
+            self._zmovieConvThread.wait(2000)
         self._stopPreview()
+        self._showGraphicsHideVideo()
         self._resetPlaybackButtons()
 
     def closeEvent(self, event):
@@ -1614,9 +1673,62 @@ class MainWindow(QMainWindow):
         self._resetPlaybackButtons()
         self.statusBar().showMessage(f"Audio error: {msg}", 5000)
 
+    # ── ZMovie video playback ─────────────────────────────────────────────────
+
+    def _playZmovieVideo(self):
+        """Extract and play the current zmovie entry as MP4 video."""
+        global currentZmovieKey
+        if not zmovieOriginalData or not currentZmovieKey:
+            self.statusBar().showMessage("No zmovie entry selected.", 3000)
+            return
+
+        # Parse entry index from key like "zmovie-00"
+        try:
+            entryIndex = int(currentZmovieKey.split("-")[1])
+        except (IndexError, ValueError):
+            self.statusBar().showMessage(f"Invalid zmovie key: {currentZmovieKey}", 3000)
+            return
+
+        self.stopVoxFile()
+
+        self._zmovieConvThread = ZmovieConversionThread(
+            zmovieOriginalData, entryIndex, parent=self
+        )
+        self._zmovieConvThread.conversionDone.connect(self._onZmovieConversionDone)
+        self._zmovieConvThread.errorOccurred.connect(self._onPlaybackError)
+        self._zmovieConvThread.start()
+
+        self.ui.playVoxButton.setEnabled(False)
+        self.stopVoxButton.setEnabled(True)
+        self.statusBar().showMessage("Converting zmovie to MP4…")
+
+    def _onZmovieConversionDone(self, mp4Path: str):
+        """Load the converted MP4 into QMediaPlayer and start video playback."""
+        self.ui.graphicsView.setVisible(False)
+        self._videoWidget.setVisible(True)
+        self._mediaPlayer.setSource(QUrl.fromLocalFile(mp4Path))
+        self._mediaPlayer.play()
+        self._frameTimer.start()
+        self.statusBar().showMessage("Playing zmovie…")
+
+    def _onVideoStateChanged(self, state):
+        """Handle QMediaPlayer state changes — detect when video finishes."""
+        if state == QMediaPlayer.PlaybackState.StoppedState:
+            self._stopPreview()
+            self._showGraphicsHideVideo()
+            self._resetPlaybackButtons()
+            self.statusBar().showMessage("Video playback finished.", 2000)
+
+    def _showGraphicsHideVideo(self):
+        """Restore graphicsView and hide the video widget."""
+        self._videoWidget.setVisible(False)
+        self.ui.graphicsView.setVisible(True)
+
     def _resetPlaybackButtons(self):
-        # ZMovie uses STR video format — no audio playback supported
-        can_play = (self._editorMode != "zmovie") and (bool(voxManager) or bool(demoManager))
+        if self._editorMode == "zmovie":
+            can_play = bool(zmovieOriginalData)
+        else:
+            can_play = bool(voxManager) or bool(demoManager)
         self.ui.playVoxButton.setEnabled(can_play)
         self.stopVoxButton.setEnabled(False)
 
@@ -1637,10 +1749,42 @@ class MainWindow(QMainWindow):
         self._previewTextItem.setTextWidth(-1)  # no word-wrap; honour explicit newlines only
         self._previewScene.addItem(self._previewTextItem)
 
+        # ── ZMovie video player (hidden by default) ─────────────────────────
+        self._videoWidget = QVideoWidget()
+        self._videoWidget.setVisible(False)
+        # Insert video widget into the same layout as graphicsView
+        parentLayout = self.ui.graphicsView.parentWidget().layout()
+        if parentLayout:
+            idx = parentLayout.indexOf(self.ui.graphicsView)
+            parentLayout.insertWidget(idx + 1, self._videoWidget)
+
+        self._mediaPlayer = QMediaPlayer(self)
+        self._audioOutput = QAudioOutput(self)
+        self._mediaPlayer.setAudioOutput(self._audioOutput)
+        self._mediaPlayer.setVideoOutput(self._videoWidget)
+        self._mediaPlayer.playbackStateChanged.connect(self._onVideoStateChanged)
+
+        # Subtitle overlay label on top of video widget
+        self._videoSubLabel = QLabel(self._videoWidget)
+        self._videoSubLabel.setAlignment(Qt.AlignHCenter | Qt.AlignBottom)
+        self._videoSubLabel.setStyleSheet(
+            "color: white; background: transparent; font: bold 14pt Arial;"
+            "padding: 6px;"
+        )
+        self._videoSubLabel.setWordWrap(True)
+
+        # Track zmovie conversion thread
+        self._zmovieConvThread: ZmovieConversionThread = None
+
     def _tickPreview(self):
         """Called ~30× per second while audio is playing. Updates the subtitle overlay."""
-        elapsed_ms = max(0, self._elapsed.elapsed() - SUBTITLE_OFFSET_MS)
-        currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
+        # For zmovie video playback, use QMediaPlayer position instead of elapsed timer
+        if self._editorMode == "zmovie" and self._mediaPlayer.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            elapsed_ms = max(0, self._mediaPlayer.position())
+            currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
+        else:
+            elapsed_ms = max(0, self._elapsed.elapsed() - SUBTITLE_OFFSET_MS)
+            currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
         text = ""
 
         if self._editorMode in ("demo", "vox", "zmovie"):
@@ -1657,8 +1801,14 @@ class MainWindow(QMainWindow):
                     text = line.text.replace('\x00', '').replace("｜", "\n")
                     break
 
-        self._previewTextItem.setPlainText(text)
-        self._positionPreviewText()
+        # Route subtitle text to the appropriate display
+        if self._editorMode == "zmovie" and self._videoWidget.isVisible():
+            self._videoSubLabel.setText(text)
+            self._videoSubLabel.setGeometry(0, self._videoWidget.height() - 60,
+                                            self._videoWidget.width(), 60)
+        else:
+            self._previewTextItem.setPlainText(text)
+            self._positionPreviewText()
 
     def _positionPreviewText(self):
         """Centre the text item horizontally and pin it near the bottom of the view."""
@@ -1674,6 +1824,9 @@ class MainWindow(QMainWindow):
         """Stop the frame timer and clear the subtitle overlay."""
         self._frameTimer.stop()
         self._previewTextItem.setPlainText("")
+        self._videoSubLabel.setText("")
+        if self._mediaPlayer.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+            self._mediaPlayer.stop()
 
     # ── Demo mode ─────────────────────────────────────────────────────────────
 
@@ -2187,7 +2340,7 @@ class MainWindow(QMainWindow):
         self.actionZmovieMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
-        self.ui.playVoxButton.setEnabled(False)  # no audio in zmovie mode
+        self.ui.playVoxButton.setEnabled(bool(zmovieOriginalData))
         self.ui.offsetListBox.clear()
         for name in sorted(zmovieDialogueJson.keys()):
             self.ui.offsetListBox.addItem(name, userData=name)
