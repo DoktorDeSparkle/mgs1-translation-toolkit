@@ -1778,13 +1778,15 @@ class MainWindow(QMainWindow):
         if currentSubIndex < 0:
             return
 
+        savedIdx = currentSubIndex  # snapshot before any signal can mutate the global
+
         if self._editorMode in ("demo", "vox", "zmovie"):
             key, djson = self._modeData()
             subtitles = djson.get(key, {})
             sortedFrames = sorted(subtitles.keys(), key=int)
             newStart = str(self.ui.startFrameBox.value())
-            if currentSubIndex < len(sortedFrames):
-                oldFrame = sortedFrames[currentSubIndex]
+            if savedIdx < len(sortedFrames):
+                oldFrame = sortedFrames[savedIdx]
                 newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
                 newDur = str(self.ui.durationBox.value())
                 del subtitles[oldFrame]
@@ -1796,26 +1798,20 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Changes applied (unsaved \u2014 use File \u2192 Export {label} JSON)", 5000
             )
-            # Advance to next entry
-            newSortedFrames = sorted(subtitles.keys(), key=int)
-            try:
-                newIndex = newSortedFrames.index(newStart)
-            except ValueError:
-                newIndex = currentSubIndex
-            nextRow = min(newIndex + 1, len(newSortedFrames) - 1)
+            nextRow = min(savedIdx + 1, self.ui.subsPreviewList.count() - 1)
             self.ui.subsPreviewList.setCurrentRow(nextRow)
             return
 
         # --- Text → XML -------------------------------------------------------
         newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "\\r\\n")
-        radioManager.updateSubText(currentSubIndex, newText)
+        radioManager.updateSubText(savedIdx, newText)
 
         # --- Timing + text → VOX demo -----------------------------------------
         lines = self._getVoxSubtitleLines()
-        if lines and currentSubIndex < len(lines):
-            lines[currentSubIndex].startFrame = self.ui.startFrameBox.value()
-            lines[currentSubIndex].displayFrames = self.ui.durationBox.value()
-            lines[currentSubIndex].text = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
+        if lines and savedIdx < len(lines):
+            lines[savedIdx].startFrame = self.ui.startFrameBox.value()
+            lines[savedIdx].displayFrames = self.ui.durationBox.value()
+            lines[savedIdx].text = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
 
         # Refresh subtitle list to show new text
         self._modified = True
@@ -1826,7 +1822,7 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage("Changes applied (unsaved — use File → Save RADIO.XML or Save Project As)", 5000)
         # Advance to next entry
-        nextRow = min(currentSubIndex + 1, self.ui.subsPreviewList.count() - 1)
+        nextRow = min(savedIdx + 1, self.ui.subsPreviewList.count() - 1)
         self.ui.subsPreviewList.setCurrentRow(nextRow)
 
     # ── Translate / Auto-format helpers ─────────────────────────────────────
