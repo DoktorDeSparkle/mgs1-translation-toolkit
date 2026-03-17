@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
-    QFrame)
+    QFrame, QComboBox)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
 from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -1074,6 +1074,17 @@ class MainWindow(QMainWindow):
         self.chkUnclaimedVox.toggled.connect(self._populateVoxOffsets)
         self.ui.verticalLayout.insertWidget(labelIdx + 3, self.chkUnclaimedVox)
 
+        # ── Frequency filter (radio mode only) ───────────────────────────────
+        freqFilterRow = QHBoxLayout()
+        self.freqFilterLabel = QLabel("Freq:")
+        self.freqFilterLabel.setVisible(False)
+        self.freqFilterCombo = QComboBox()
+        self.freqFilterCombo.setVisible(False)
+        self.freqFilterCombo.currentIndexChanged.connect(self._populateRadioOffsets)
+        freqFilterRow.addWidget(self.freqFilterLabel)
+        freqFilterRow.addWidget(self.freqFilterCombo)
+        self.ui.verticalLayout.insertLayout(labelIdx + 4, freqFilterRow)
+
         # ── Entry navigation buttons (▲ / ▼ below offset list) ───────────────
         entryNavRow = QHBoxLayout()
         self.btnPrevEntry = QPushButton("▲ Prev")
@@ -1086,7 +1097,7 @@ class MainWindow(QMainWindow):
         self.btnNextEntry.clicked.connect(lambda: self._navigateEntry(1))
         entryNavRow.addWidget(self.btnPrevEntry)
         entryNavRow.addWidget(self.btnNextEntry)
-        self.ui.verticalLayout.insertLayout(labelIdx + 4, entryNavRow)
+        self.ui.verticalLayout.insertLayout(labelIdx + 5, entryNavRow)
 
         # ── Project actions (top of File menu) ───────────────────────────────
         self.actionOpenFolder = QAction("Open Folder...", self)
@@ -1393,20 +1404,44 @@ class MainWindow(QMainWindow):
                 else:
                     _radioClaimedVoxAddrs.add(byteAddr)
 
+    def _refreshFreqFilter(self):
+        """Rebuild the frequency filter combo from the loaded radio calls."""
+        self.freqFilterCombo.blockSignals(True)
+        current = self.freqFilterCombo.currentData()
+        self.freqFilterCombo.clear()
+        self.freqFilterCombo.addItem("All Frequencies", userData=None)
+        freqs = sorted(
+            {c.get("freq") for c in radioManager.calls if c.get("freq")},
+            key=lambda f: float(f)
+        )
+        for freq in freqs:
+            self.freqFilterCombo.addItem(freq, userData=freq)
+        # Restore previous selection if still present
+        idx = self.freqFilterCombo.findData(current)
+        self.freqFilterCombo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.freqFilterCombo.blockSignals(False)
+
     def _populateRadioOffsets(self):
-        """Repopulate the Radio offset list, optionally hiding disc-2 calls."""
+        """Repopulate the Radio offset list, applying disc and frequency filters."""
         filterDisc2 = self.chkDisc1Only.isChecked()
+        filterFreq = self.freqFilterCombo.currentData()  # None = show all
         current = self.ui.offsetListBox.currentData()
         self.ui.offsetListBox.blockSignals(True)
         self.ui.offsetListBox.clear()
-        for offset in radioManager.getCallOffsets():
+        for call in radioManager.calls:
+            offset = call.get("offset")
             if filterDisc2 and offset in _radioDisc2Offsets:
+                continue
+            if filterFreq and call.get("freq") != filterFreq:
                 continue
             self.ui.offsetListBox.addItem(offset, userData=offset)
         self.ui.offsetListBox.blockSignals(False)
         # Restore selection if still present, else select first
         idx = self.ui.offsetListBox.findData(current)
         self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
+        # Always force-reload the call — setCurrentIndex is a no-op when the
+        # index doesn't change, so the VOX/subtitle lists would stay stale.
+        self._selectRadioCall(self.ui.offsetListBox.currentIndex())
 
     def _populateVoxOffsets(self):
         """Repopulate the VOX offset list, optionally showing only unclaimed clips."""
@@ -2836,6 +2871,8 @@ class MainWindow(QMainWindow):
         self.ui.VoxAddressDisplay.setVisible(False)
         self.chkDisc1Only.setVisible(False)
         self.chkUnclaimedVox.setVisible(False)
+        self.freqFilterLabel.setVisible(False)
+        self.freqFilterCombo.setVisible(False)
 
     def _switchToDemoMode(self):
         self._editorMode = "demo"
@@ -2896,6 +2933,9 @@ class MainWindow(QMainWindow):
         self.ui.playVoxButton.setEnabled(bool(voxManager))
         self.chkUnclaimedVox.setVisible(False)
         self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
+        self.freqFilterLabel.setVisible(True)
+        self.freqFilterCombo.setVisible(True)
+        self._refreshFreqFilter()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         self.ui.audioCueListView.clear()
