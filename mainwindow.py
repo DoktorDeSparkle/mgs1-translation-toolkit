@@ -1074,6 +1074,20 @@ class MainWindow(QMainWindow):
         self.chkUnclaimedVox.toggled.connect(self._populateVoxOffsets)
         self.ui.verticalLayout.insertWidget(labelIdx + 3, self.chkUnclaimedVox)
 
+        # ── Entry navigation buttons (▲ / ▼ below offset list) ───────────────
+        entryNavRow = QHBoxLayout()
+        self.btnPrevEntry = QPushButton("▲ Prev")
+        self.btnPrevEntry.setToolTip("Previous entry (Cmd+Up)")
+        self.btnPrevEntry.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Up))
+        self.btnPrevEntry.clicked.connect(lambda: self._navigateEntry(-1))
+        self.btnNextEntry = QPushButton("▼ Next")
+        self.btnNextEntry.setToolTip("Next entry (Cmd+Down)")
+        self.btnNextEntry.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Down))
+        self.btnNextEntry.clicked.connect(lambda: self._navigateEntry(1))
+        entryNavRow.addWidget(self.btnPrevEntry)
+        entryNavRow.addWidget(self.btnNextEntry)
+        self.ui.verticalLayout.insertLayout(labelIdx + 4, entryNavRow)
+
         # ── Project actions (top of File menu) ───────────────────────────────
         self.actionOpenFolder = QAction("Open Folder...", self)
         self.actionOpenFolder.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, and VOX.DAT from a folder")
@@ -1513,6 +1527,16 @@ class MainWindow(QMainWindow):
 
     # ── Navigation handlers ───────────────────────────────────────────────────
 
+    def _navigateEntry(self, delta: int):
+        """Move to the previous (delta=-1) or next (delta=+1) entry in the offset list."""
+        count = self.ui.offsetListBox.count()
+        if count == 0:
+            return
+        current = self.ui.offsetListBox.currentIndex()
+        newIdx = max(0, min(current + delta, count - 1))
+        if newIdx != current:
+            self.ui.offsetListBox.setCurrentIndex(newIdx)
+
     def selectCallOffset(self, index):
         """Route to the appropriate handler depending on the current editor mode."""
         if self._editorMode == "demo":
@@ -1544,6 +1568,14 @@ class MainWindow(QMainWindow):
             QListWidgetItem(audio, self.ui.audioCueListView)
 
         self._clearEditor()
+
+        # If the call has no VOX_CUES (e.g. staff calls), load its SUBTITLE
+        # elements directly so the subtitle list isn't left blank.
+        if self.ui.audioCueListView.count() == 0:
+            self.ui.subsPreviewList.clear()
+            for sub in radioManager.workingCall.findall("SUBTITLE"):
+                text = sub.get("text", "")
+                QListWidgetItem(text, self.ui.subsPreviewList)
 
     def _selectDemo(self, index):
         global currentDemoKey, currentSubIndex
@@ -1618,6 +1650,8 @@ class MainWindow(QMainWindow):
             QListWidgetItem(text, self.ui.subsPreviewList)
 
         self._clearEditor()
+        if self.ui.subsPreviewList.count() > 0:
+            self.ui.subsPreviewList.setCurrentRow(0)
 
     def subtitleSelect(self, item):
         global currentSubIndex
@@ -2861,10 +2895,15 @@ class MainWindow(QMainWindow):
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         self.ui.audioCueListView.clear()
-        self._populateRadioOffsets()  # fires _selectRadioCall(0) → fills audioCueListView
-        # Auto-select first audio cue so subtitles are visible immediately
+        self._populateRadioOffsets()
+        # Explicitly populate the call — setCurrentIndex is a no-op if index didn't change,
+        # so currentIndexChanged won't fire and audioCueListView would stay blank.
+        self._selectRadioCall(self.ui.offsetListBox.currentIndex())
+        # Auto-select first audio cue and first subtitle so editor is ready immediately
         if self.ui.audioCueListView.count() > 0:
             self.ui.audioCueListView.setCurrentRow(0)
+        if self.ui.subsPreviewList.count() > 0:
+            self.ui.subsPreviewList.setCurrentRow(0)
 
     def _getDemoSubtitleLines(self) -> list:
         """Return a flat list of dialogueLine objects from the currently selected demo entry.
