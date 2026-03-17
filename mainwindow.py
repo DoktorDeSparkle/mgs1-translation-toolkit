@@ -1709,10 +1709,10 @@ class MainWindow(QMainWindow):
             key, djson = self._modeData()
             subtitles = djson.get(key, {})
             sortedFrames = sorted(subtitles.keys(), key=int)
+            newStart = str(self.ui.startFrameBox.value())
             if currentSubIndex < len(sortedFrames):
                 oldFrame = sortedFrames[currentSubIndex]
                 newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
-                newStart = str(self.ui.startFrameBox.value())
                 newDur = str(self.ui.durationBox.value())
                 del subtitles[oldFrame]
                 subtitles[newStart] = {"duration": newDur, "text": newText}
@@ -1723,6 +1723,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Changes applied (unsaved \u2014 use File \u2192 Export {label} JSON)", 5000
             )
+            # Advance to next entry
+            newSortedFrames = sorted(subtitles.keys(), key=int)
+            try:
+                newIndex = newSortedFrames.index(newStart)
+            except ValueError:
+                newIndex = currentSubIndex
+            nextRow = min(newIndex + 1, len(newSortedFrames) - 1)
+            self.ui.subsPreviewList.setCurrentRow(nextRow)
             return
 
         # --- Text → XML -------------------------------------------------------
@@ -1744,6 +1752,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Changes applied (unsaved — use File → Save Project)", 5000)
         else:
             self.statusBar().showMessage("Changes applied (unsaved — use File → Save RADIO.XML or Save Project As)", 5000)
+        # Advance to next entry
+        nextRow = min(currentSubIndex + 1, self.ui.subsPreviewList.count() - 1)
+        self.ui.subsPreviewList.setCurrentRow(nextRow)
 
     # ── Translate / Auto-format helpers ─────────────────────────────────────
 
@@ -2847,10 +2858,13 @@ class MainWindow(QMainWindow):
         self.ui.playVoxButton.setEnabled(bool(voxManager))
         self.chkUnclaimedVox.setVisible(False)
         self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
-        self._populateRadioOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         self.ui.audioCueListView.clear()
+        self._populateRadioOffsets()  # fires _selectRadioCall(0) → fills audioCueListView
+        # Auto-select first audio cue so subtitles are visible immediately
+        if self.ui.audioCueListView.count() > 0:
+            self.ui.audioCueListView.setCurrentRow(0)
 
     def _getDemoSubtitleLines(self) -> list:
         """Return a flat list of dialogueLine objects from the currently selected demo entry.
