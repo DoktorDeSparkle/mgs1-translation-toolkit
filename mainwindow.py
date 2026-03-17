@@ -6,8 +6,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
     QFrame)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl
-from PySide6.QtGui import QFont, QColor, QAction
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
+from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -58,7 +58,7 @@ _radioDisc2Offsets:    set = set()  # call offsets where any VOX_CUES has a zero
 _radioClaimedVoxAddrs: set = set()  # VOX byte addresses claimed by any RADIO call (non-zero only)
 
 # Project state
-projectSettings: dict = {}     # {"radio_dat_path": ..., "demo_dat_path": ..., "vox_dat_path": ...}
+projectSettings: dict = {}     # {"radio_dat_path": ..., "demo_dat_path": ..., "vox_dat_path": ..., "brf_dat_path": ..., "face_dat_path": ..., "stage_dir_path": ...}
 projectFilePath: str  = ""     # path to the currently-open .mtp file (empty if unsaved)
 
 # Font table state
@@ -269,6 +269,80 @@ class NotificationDialog(QDialog):
         self.setLayout(layout)
 
 
+class PreferencesDialog(QDialog):
+    """Application preferences dialog."""
+
+    # (display name, deep_translator language code)
+    LANGUAGES = [
+        ("English", "en"),
+        ("Japanese", "ja"),
+        ("Spanish", "es"),
+        ("French", "fr"),
+        ("German", "de"),
+        ("Italian", "it"),
+        ("Portuguese", "pt"),
+        ("Russian", "ru"),
+        ("Korean", "ko"),
+        ("Chinese (Simplified)", "zh-CN"),
+        ("Chinese (Traditional)", "zh-TW"),
+    ]
+
+    def __init__(self, settings, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Preferences")
+        self.setMinimumWidth(350)
+        self._settings = settings
+
+        layout = QVBoxLayout()
+
+        # ── Translation section ───────────────────────────────────────────
+        transGroup = QGroupBox("Translation")
+        transLayout = QFormLayout()
+
+        from PySide6.QtWidgets import QComboBox
+        self.comboTargetLang = QComboBox()
+        currentCode = settings.value("translate/target_lang", "en")
+        for i, (name, code) in enumerate(self.LANGUAGES):
+            self.comboTargetLang.addItem(name, code)
+            if code == currentCode:
+                self.comboTargetLang.setCurrentIndex(i)
+        transLayout.addRow("Target language:", self.comboTargetLang)
+
+        self.comboSourceLang = QComboBox()
+        self.comboSourceLang.addItem("Auto-detect", "auto")
+        currentSrc = settings.value("translate/source_lang", "ja")
+        idx = 0
+        for i, (name, code) in enumerate(self.LANGUAGES):
+            self.comboSourceLang.addItem(name, code)
+            if code == currentSrc:
+                idx = i + 1  # +1 for auto-detect entry
+        self.comboSourceLang.setCurrentIndex(idx)
+        transLayout.addRow("Source language:", self.comboSourceLang)
+
+        transGroup.setLayout(transLayout)
+        layout.addWidget(transGroup)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        btnRow = QHBoxLayout()
+        btnOk = QPushButton("OK")
+        btnOk.setDefault(True)
+        btnOk.clicked.connect(self.accept)
+        btnRow.addWidget(btnOk)
+        btnCancel = QPushButton("Cancel")
+        btnCancel.clicked.connect(self.reject)
+        btnRow.addWidget(btnCancel)
+        layout.addLayout(btnRow)
+
+        self.setLayout(layout)
+
+    def accept(self):
+        self._settings.setValue("translate/target_lang",
+                                self.comboTargetLang.currentData())
+        self._settings.setValue("translate/source_lang",
+                                self.comboSourceLang.currentData())
+        super().accept()
+
+
 class FinalizeProjectDialog(QDialog):
     """Dialog for batch-compiling all (or selected) game data files."""
     def __init__(self, stageDirPath="", parent=None):
@@ -296,21 +370,35 @@ class FinalizeProjectDialog(QDialog):
         self.chkDebug = QCheckBox("Debug output (-v)")
         radioLayout.addRow(self.chkDebug)
 
+        self.radioGroup.setLayout(radioLayout)
+        layout.addWidget(self.radioGroup)
+
+        # ── STAGE.DIR section ─────────────────────────────────────────────
+        self.stageGroup = QGroupBox("STAGE.DIR")
+        self.stageGroup.setCheckable(True)
+        self.stageGroup.setChecked(bool(stageDirPath))
+        stageLayout = QFormLayout()
+
         stageDirRow = QHBoxLayout()
         self.txtStageDir = QLineEdit(stageDirPath)
-        self.txtStageDir.setPlaceholderText("Path to STAGE.DIR (optional)")
+        self.txtStageDir.setPlaceholderText("Path to STAGE.DIR")
         stageDirRow.addWidget(self.txtStageDir)
         self.btnBrowseStage = QPushButton("Browse...")
         self.btnBrowseStage.clicked.connect(self._browseStageDir)
         stageDirRow.addWidget(self.btnBrowseStage)
-        radioLayout.addRow("STAGE.DIR path:", stageDirRow)
+        stageLayout.addRow("STAGE.DIR path:", stageDirRow)
 
         self.txtStageOut = QLineEdit()
         self.txtStageOut.setPlaceholderText("Output name for STAGE.DIR (optional, -S)")
-        radioLayout.addRow("STAGE.DIR output:", self.txtStageOut)
+        stageLayout.addRow("STAGE.DIR output:", self.txtStageOut)
 
-        self.radioGroup.setLayout(radioLayout)
-        layout.addWidget(self.radioGroup)
+        self.stageGroup.setLayout(stageLayout)
+        layout.addWidget(self.stageGroup)
+
+        # Grey out STAGE.DIR unless Radio or Demo is checked
+        self._updateStageEnabled()
+        self.radioGroup.toggled.connect(self._updateStageEnabled)
+        self.demoGroup = None  # forward ref; connected after demoGroup is created
 
         # ── DEMO section ──────────────────────────────────────────────────
         self.demoGroup = QGroupBox("DEMO.DAT")
@@ -320,6 +408,7 @@ class FinalizeProjectDialog(QDialog):
         demoLayout.addWidget(QLabel("Compile JSON edits into DEMO.DAT binary."))
         self.demoGroup.setLayout(demoLayout)
         layout.addWidget(self.demoGroup)
+        self.demoGroup.toggled.connect(self._updateStageEnabled)
 
         # ── VOX section ───────────────────────────────────────────────────
         self.voxGroup = QGroupBox("VOX.DAT")
@@ -355,6 +444,12 @@ class FinalizeProjectDialog(QDialog):
 
         self.setLayout(layout)
 
+    def _updateStageEnabled(self):
+        """Grey out STAGE.DIR section unless Radio or Demo is checked."""
+        radioOn = self.radioGroup.isChecked()
+        demoOn = self.demoGroup is not None and self.demoGroup.isChecked()
+        self.stageGroup.setEnabled(radioOn or demoOn)
+
     def _browseStageDir(self):
         path = QFileDialog.getOpenFileName(
             self, "Select STAGE.DIR", self.txtStageDir.text(),
@@ -368,6 +463,8 @@ class FinalizeProjectDialog(QDialog):
     def radioEnabled(self): return self.radioGroup.isChecked()
     @property
     def demoEnabled(self): return self.demoGroup.isChecked()
+    @property
+    def stageEnabled(self): return self.stageGroup.isChecked() and self.stageGroup.isEnabled()
     @property
     def voxEnabled(self): return self.voxGroup.isChecked()
     @property
@@ -389,10 +486,11 @@ class FinalizeProjectDialog(QDialog):
 
 
 class FontEditorDialog(QDialog):
-    """Dialog for extracting, editing, and injecting 12x12 kana/kanji font glyphs."""
+    """Dialog for editing both variable-width ASCII and fixed 12x12 kana/kanji glyphs."""
 
-    COLS = 22  # grid columns
-    SCALE = 4  # display scale (12px -> 48px)
+    KANA_COLS = 22   # grid columns for kana tab
+    ASCII_COLS = 16   # grid columns for ASCII tab
+    SCALE = 4         # display scale (12px -> 48px)
 
     def __init__(self, tblMapping=None, parent=None):
         super().__init__(parent)
@@ -404,19 +502,33 @@ class FontEditorDialog(QDialog):
         self._MFT = MFT
         self._tblTools = tblTools
 
-        self._glyphs: list[bytes] = []         # 440 x 36-byte glyph data
+        self._fontBlock = None                 # MFT.FontBlock when loaded
         self._tblMapping: dict[str, str] = tblMapping or tblTools.generateDefaultTbl()
-        self._modifiedSlots: set[int] = set()
+        self._modifiedKanaSlots: set[int] = set()
+        self._modifiedAsciiSlots: set[int] = set()
+        self._selectedSection: str = "kana"    # "ascii" or "kana"
         self._selectedSlot: int = -1
         self._stageDirPath: str = ""
-        self._glyphButtons: list[QPushButton] = []
+        self._kanaButtons: list[QPushButton] = []
+        self._asciiButtons: list[QPushButton] = []
 
         self._buildUI()
 
+    # ── property aliases for backward compat with MainWindow integration ──
+
+    @property
+    def tblMapping(self) -> dict[str, str]:
+        return self._tblMapping
+
+    @property
+    def tblRaw(self) -> str:
+        return self._tblTools.tblToString(self._tblMapping)
+
+    # ── UI construction ──────────────────────────────────────────────────
+
     def _buildUI(self):
         from PySide6.QtWidgets import (QScrollArea, QWidget, QGridLayout,
-            QSplitter, QFrame, QSpinBox, QSizePolicy)
-        from PySide6.QtGui import QPixmap, QImage
+            QSplitter, QTabWidget, QSpinBox, QSizePolicy)
 
         mainLayout = QVBoxLayout(self)
 
@@ -432,23 +544,39 @@ class FontEditorDialog(QDialog):
         self.btnSaveTbl.clicked.connect(self._saveTbl)
         topRow.addWidget(self.btnSaveTbl)
         topRow.addStretch()
+        self._fontInfoLabel = QLabel("")
+        topRow.addWidget(self._fontInfoLabel)
         mainLayout.addLayout(topRow)
 
-        # ── Splitter: grid on left, detail panel on right ────────────────
+        # ── Splitter: tabs on left, detail panel on right ────────────────
         splitter = QSplitter(Qt.Horizontal)
 
-        # Grid
-        scrollArea = QScrollArea()
-        scrollArea.setWidgetResizable(True)
-        gridWidget = QWidget()
-        self._gridLayout = QGridLayout(gridWidget)
-        self._gridLayout.setSpacing(2)
-        scrollArea.setWidget(gridWidget)
-        splitter.addWidget(scrollArea)
+        # Tab widget for ASCII / Kana grids
+        self._tabWidget = QTabWidget()
+
+        # -- ASCII tab --
+        asciiScroll = QScrollArea()
+        asciiScroll.setWidgetResizable(True)
+        asciiGridWidget = QWidget()
+        self._asciiGridLayout = QGridLayout(asciiGridWidget)
+        self._asciiGridLayout.setSpacing(2)
+        asciiScroll.setWidget(asciiGridWidget)
+        self._tabWidget.addTab(asciiScroll, "ASCII (96)")
+
+        # -- Kana/Kanji tab --
+        kanaScroll = QScrollArea()
+        kanaScroll.setWidgetResizable(True)
+        kanaGridWidget = QWidget()
+        self._kanaGridLayout = QGridLayout(kanaGridWidget)
+        self._kanaGridLayout.setSpacing(2)
+        kanaScroll.setWidget(kanaGridWidget)
+        self._tabWidget.addTab(kanaScroll, "Kana/Kanji")
+
+        splitter.addWidget(self._tabWidget)
 
         # Detail panel
         detailWidget = QWidget()
-        detailWidget.setFixedWidth(220)
+        detailWidget.setFixedWidth(240)
         detailLayout = QVBoxLayout(detailWidget)
 
         self._previewLabel = QLabel()
@@ -471,6 +599,21 @@ class FontEditorDialog(QDialog):
         charRow.addWidget(self._charEdit)
         charRow.addStretch()
         detailLayout.addLayout(charRow)
+
+        # Width spinner (ASCII only, hidden for kana)
+        from PySide6.QtWidgets import QSpinBox
+        self._widthRow = QHBoxLayout()
+        self._widthLabel = QLabel("Width:")
+        self._widthRow.addWidget(self._widthLabel)
+        self._widthSpin = QSpinBox()
+        self._widthSpin.setRange(1, 12)
+        self._widthSpin.setFixedWidth(60)
+        self._widthSpin.valueChanged.connect(self._onWidthChanged)
+        self._widthRow.addWidget(self._widthSpin)
+        self._widthRow.addStretch()
+        detailLayout.addLayout(self._widthRow)
+        self._widthLabel.setVisible(False)
+        self._widthSpin.setVisible(False)
 
         self.btnImportPng = QPushButton("Import PNG...")
         self.btnImportPng.clicked.connect(self._importSinglePng)
@@ -500,34 +643,88 @@ class FontEditorDialog(QDialog):
         bottomRow.addWidget(self.btnApply)
         mainLayout.addLayout(bottomRow)
 
-        # Build empty grid placeholders
-        self._buildGrid()
+    # ── Grid building / refresh ──────────────────────────────────────────
 
-    def _buildGrid(self):
-        from PySide6.QtGui import QPixmap, QImage, QIcon
+    def _buildGrids(self):
+        """Build glyph button grids sized to the loaded FontBlock."""
+        from PySide6.QtGui import QIcon
         from PySide6.QtCore import QSize
 
-        self._glyphButtons.clear()
+        fb = self._fontBlock
+        if not fb:
+            return
+
         cellSize = 12 * self.SCALE + 8  # 56px
 
-        for i in range(self._MFT.GLYPH_COUNT):
+        # Clear old buttons
+        for btn in self._asciiButtons:
+            btn.deleteLater()
+        self._asciiButtons.clear()
+        for btn in self._kanaButtons:
+            btn.deleteLater()
+        self._kanaButtons.clear()
+
+        # ASCII grid
+        for i in range(fb.asciiCount):
+            btn = QPushButton()
+            btn.setFixedSize(cellSize, cellSize)
+            btn.setToolTip(f"ASCII {i}")
+            btn.clicked.connect(lambda checked=False, idx=i: self._selectAsciiSlot(idx))
+            row, col = divmod(i, self.ASCII_COLS)
+            self._asciiGridLayout.addWidget(btn, row, col)
+            self._asciiButtons.append(btn)
+
+        # Kana grid
+        for i in range(fb.kanaCount):
             btn = QPushButton()
             btn.setFixedSize(cellSize, cellSize)
             btn.setToolTip(f"Slot {i}")
-            btn.setProperty("slotIndex", i)
-            btn.clicked.connect(lambda checked=False, idx=i: self._selectSlot(idx))
-            row, col = divmod(i, self.COLS)
-            self._gridLayout.addWidget(btn, row, col)
-            self._glyphButtons.append(btn)
+            btn.clicked.connect(lambda checked=False, idx=i: self._selectKanaSlot(idx))
+            row, col = divmod(i, self.KANA_COLS)
+            self._kanaGridLayout.addWidget(btn, row, col)
+            self._kanaButtons.append(btn)
 
-    def _refreshGrid(self):
-        from PySide6.QtGui import QPixmap, QImage, QIcon
+        # Update tab labels with actual counts
+        self._tabWidget.setTabText(0, f"ASCII ({fb.asciiCount})")
+        self._tabWidget.setTabText(1, f"Kana/Kanji ({fb.kanaCount})")
+
+    def _refreshAsciiGrid(self):
+        from PySide6.QtGui import QPixmap, QIcon
         from PySide6.QtCore import QSize
 
+        fb = self._fontBlock
+        if not fb:
+            return
+
         iconSize = 12 * self.SCALE
-        for i, btn in enumerate(self._glyphButtons):
-            if i < len(self._glyphs):
-                img = self._glyphToQImage(self._glyphs[i])
+        for i, btn in enumerate(self._asciiButtons):
+            if i < len(fb.asciiGlyphs):
+                w = fb.asciiPixelWidth(i)
+                img = self._glyphToQImage(fb.asciiGlyphs[i], w)
+                scaled = img.scaled(iconSize, iconSize, Qt.KeepAspectRatio, Qt.FastTransformation)
+                btn.setIcon(QIcon(QPixmap.fromImage(scaled)))
+                btn.setIconSize(QSize(iconSize, iconSize))
+
+            char = chr(0x20 + i) if i < 95 else chr(0x7F)
+            btn.setToolTip(f"ASCII {i} [{char!r}] w={fb.asciiPixelWidth(i)}")
+
+            if i in self._modifiedAsciiSlots:
+                btn.setStyleSheet("border: 2px solid #44aaff;")
+            else:
+                btn.setStyleSheet("")
+
+    def _refreshKanaGrid(self):
+        from PySide6.QtGui import QPixmap, QIcon
+        from PySide6.QtCore import QSize
+
+        fb = self._fontBlock
+        if not fb:
+            return
+
+        iconSize = 12 * self.SCALE
+        for i, btn in enumerate(self._kanaButtons):
+            if i < len(fb.kanaGlyphs):
+                img = self._glyphToQImage(fb.kanaGlyphs[i], self._MFT.KANA_GLYPH_WIDTH)
                 scaled = img.scaled(iconSize, iconSize, Qt.KeepAspectRatio, Qt.FastTransformation)
                 btn.setIcon(QIcon(QPixmap.fromImage(scaled)))
                 btn.setIconSize(QSize(iconSize, iconSize))
@@ -536,47 +733,96 @@ class FontEditorDialog(QDialog):
             char = self._tblMapping.get(hexCode, "")
             btn.setToolTip(f"Slot {i} [{hexCode}] {char}")
 
-            if i in self._modifiedSlots:
+            if i in self._modifiedKanaSlots:
                 btn.setStyleSheet("border: 2px solid #44aaff;")
             else:
                 btn.setStyleSheet("")
 
-    def _glyphToQImage(self, data: bytes):
+    def _refreshAllGrids(self):
+        self._refreshAsciiGrid()
+        self._refreshKanaGrid()
+
+    def _glyphToQImage(self, data: bytes, width: int = 12):
         from PySide6.QtGui import QImage
-        pixels = self._MFT.glyphToPixels(data)
-        img = QImage(12, 12, QImage.Format_Grayscale8)
+        height = self._MFT.GLYPH_HEIGHT
+        pixels = self._MFT.glyphToPixels(data, width, height)
+        img = QImage(width, height, QImage.Format_Grayscale8)
         for y, row in enumerate(pixels):
             for x, val in enumerate(row):
                 gray = self._MFT.PALETTE[val]
                 img.setPixelColor(x, y, QColor(gray, gray, gray))
         return img
 
-    def _selectSlot(self, idx):
+    # ── Slot selection ───────────────────────────────────────────────────
+
+    def _selectAsciiSlot(self, idx):
         from PySide6.QtGui import QPixmap
+        self._selectedSection = "ascii"
         self._selectedSlot = idx
-        hexCode = self._tblTools.slotToHexCode(idx)
-        char = self._tblMapping.get(hexCode, "")
 
-        self._slotLabel.setText(f"Slot: {idx}")
-        self._hexLabel.setText(f"Hex: {hexCode}")
+        fb = self._fontBlock
+        char = chr(0x20 + idx) if idx < 95 else chr(0x7F)
+        self._slotLabel.setText(f"ASCII Slot: {idx}")
+        self._hexLabel.setText(f"Char: {char!r}  (0x{0x20 + idx:02X})")
         self._charEdit.setText(char)
+        self._charEdit.setEnabled(False)  # ASCII chars are fixed
 
-        if idx < len(self._glyphs):
-            img = self._glyphToQImage(self._glyphs[idx])
+        # Show width spinner
+        self._widthLabel.setVisible(True)
+        self._widthSpin.setVisible(True)
+        if fb and idx < len(fb.asciiGlyphs):
+            self._widthSpin.blockSignals(True)
+            self._widthSpin.setValue(fb.asciiPixelWidth(idx))
+            self._widthSpin.blockSignals(False)
+
+        if fb and idx < len(fb.asciiGlyphs):
+            w = fb.asciiPixelWidth(idx)
+            img = self._glyphToQImage(fb.asciiGlyphs[idx], w)
             scaled = img.scaled(120, 120, Qt.KeepAspectRatio, Qt.FastTransformation)
             self._previewLabel.setPixmap(QPixmap.fromImage(scaled))
 
-        # Highlight selected button
-        for i, btn in enumerate(self._glyphButtons):
+        # Highlight in ASCII grid
+        for i, btn in enumerate(self._asciiButtons):
             if i == idx:
                 btn.setStyleSheet("border: 2px solid #ffaa00;")
-            elif i in self._modifiedSlots:
+            elif i in self._modifiedAsciiSlots:
+                btn.setStyleSheet("border: 2px solid #44aaff;")
+            else:
+                btn.setStyleSheet("")
+
+    def _selectKanaSlot(self, idx):
+        from PySide6.QtGui import QPixmap
+        self._selectedSection = "kana"
+        self._selectedSlot = idx
+
+        hexCode = self._tblTools.slotToHexCode(idx)
+        char = self._tblMapping.get(hexCode, "")
+        self._slotLabel.setText(f"Kana Slot: {idx}")
+        self._hexLabel.setText(f"Hex: {hexCode}")
+        self._charEdit.setText(char)
+        self._charEdit.setEnabled(True)
+
+        # Hide width spinner (kana are fixed 12x12)
+        self._widthLabel.setVisible(False)
+        self._widthSpin.setVisible(False)
+
+        fb = self._fontBlock
+        if fb and idx < len(fb.kanaGlyphs):
+            img = self._glyphToQImage(fb.kanaGlyphs[idx], self._MFT.KANA_GLYPH_WIDTH)
+            scaled = img.scaled(120, 120, Qt.KeepAspectRatio, Qt.FastTransformation)
+            self._previewLabel.setPixmap(QPixmap.fromImage(scaled))
+
+        # Highlight in kana grid
+        for i, btn in enumerate(self._kanaButtons):
+            if i == idx:
+                btn.setStyleSheet("border: 2px solid #ffaa00;")
+            elif i in self._modifiedKanaSlots:
                 btn.setStyleSheet("border: 2px solid #44aaff;")
             else:
                 btn.setStyleSheet("")
 
     def _onCharEdited(self):
-        if self._selectedSlot < 0:
+        if self._selectedSection != "kana" or self._selectedSlot < 0:
             return
         hexCode = self._tblTools.slotToHexCode(self._selectedSlot)
         newChar = self._charEdit.text()
@@ -584,6 +830,32 @@ class FontEditorDialog(QDialog):
             self._tblMapping[hexCode] = newChar
         elif hexCode in self._tblMapping:
             del self._tblMapping[hexCode]
+
+    def _onWidthChanged(self, newWidth):
+        if self._selectedSection != "ascii" or self._selectedSlot < 0:
+            return
+        fb = self._fontBlock
+        if not fb or self._selectedSlot >= len(fb.asciiGlyphs):
+            return
+        oldWidth = fb.asciiPixelWidth(self._selectedSlot)
+        if newWidth == oldWidth:
+            return
+        # Recompute glyph data at new width (re-render from old pixel data)
+        oldGlyph = fb.asciiGlyphs[self._selectedSlot]
+        oldPixels = self._MFT.glyphToPixels(oldGlyph, oldWidth)
+        # Crop or pad each row to new width
+        newPixels = []
+        for row in oldPixels:
+            if newWidth <= len(row):
+                newPixels.append(row[:newWidth])
+            else:
+                newPixels.append(row + [0] * (newWidth - len(row)))
+        fb.asciiGlyphs[self._selectedSlot] = self._MFT.pixelsToGlyph(newPixels)
+        # Update VFW byte to new pixel width (clears any flag bits)
+        fb.asciiVfwBytes[self._selectedSlot] = newWidth
+        self._modifiedAsciiSlots.add(self._selectedSlot)
+        self._refreshAsciiGrid()
+        self._selectAsciiSlot(self._selectedSlot)
 
     # ── File operations ──────────────────────────────────────────────────
 
@@ -595,13 +867,19 @@ class FontEditorDialog(QDialog):
         if not path:
             return
         try:
-            self._glyphs = self._MFT.extractGlyphs(path)
+            self._fontBlock = self._MFT.loadFont(path)
             self._stageDirPath = path
-            self._modifiedSlots.clear()
-            self._refreshGrid()
+            self._modifiedKanaSlots.clear()
+            self._modifiedAsciiSlots.clear()
+            self._selectedSlot = -1
+            self._buildGrids()
+            self._refreshAllGrids()
             self.btnApply.setEnabled(True)
-            if self._selectedSlot >= 0:
-                self._selectSlot(self._selectedSlot)
+            fb = self._fontBlock
+            self._fontInfoLabel.setText(
+                f"Font at 0x{fb.fileOffset:X}  |  "
+                f"{fb.asciiCount} ASCII  |  {fb.kanaCount} kana/kanji  |  "
+                f"{fb.totalSize} bytes")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load font from STAGE.DIR:\n{e}")
 
@@ -613,9 +891,9 @@ class FontEditorDialog(QDialog):
             return
         try:
             self._tblMapping = self._tblTools.loadTbl(path)
-            self._refreshGrid()
-            if self._selectedSlot >= 0:
-                self._selectSlot(self._selectedSlot)
+            self._refreshKanaGrid()
+            if self._selectedSection == "kana" and self._selectedSlot >= 0:
+                self._selectKanaSlot(self._selectedSlot)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to load .tbl file:\n{e}")
 
@@ -631,7 +909,7 @@ class FontEditorDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to save .tbl file:\n{e}")
 
     def _importSinglePng(self):
-        if self._selectedSlot < 0 or not self._glyphs:
+        if self._selectedSlot < 0 or not self._fontBlock:
             QMessageBox.information(self, "No Selection", "Load a STAGE.DIR and select a glyph slot first.")
             return
         path = QFileDialog.getOpenFileName(
@@ -640,60 +918,95 @@ class FontEditorDialog(QDialog):
         if not path:
             return
         try:
-            self._glyphs[self._selectedSlot] = self._MFT.pngToGlyph(path)
-            self._modifiedSlots.add(self._selectedSlot)
-            self._refreshGrid()
-            self._selectSlot(self._selectedSlot)
+            from PIL import Image
+            fb = self._fontBlock
+            if self._selectedSection == "ascii":
+                img = Image.open(path)
+                w = img.width  # use image width as new character width
+                fb.asciiGlyphs[self._selectedSlot] = self._MFT.imageToGlyph(img, w)
+                fb.asciiVfwBytes[self._selectedSlot] = w  # update VFW to match
+                self._modifiedAsciiSlots.add(self._selectedSlot)
+                self._refreshAsciiGrid()
+                self._selectAsciiSlot(self._selectedSlot)
+            else:
+                fb.kanaGlyphs[self._selectedSlot] = self._MFT.pngToGlyph(path)
+                self._modifiedKanaSlots.add(self._selectedSlot)
+                self._refreshKanaGrid()
+                self._selectKanaSlot(self._selectedSlot)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import PNG:\n{e}")
 
     def _exportSinglePng(self):
-        if self._selectedSlot < 0 or not self._glyphs:
+        if self._selectedSlot < 0 or not self._fontBlock:
             QMessageBox.information(self, "No Selection", "Load a STAGE.DIR and select a glyph slot first.")
             return
+        fb = self._fontBlock
+        if self._selectedSection == "ascii":
+            defaultName = f"ascii-{self._selectedSlot:02d}.png"
+        else:
+            defaultName = f"glyph-{self._selectedSlot:03d}.png"
         path = QFileDialog.getSaveFileName(
-            self, "Export PNG", f"glyph-{self._selectedSlot:03d}.png", "PNG Files (*.png)"
+            self, "Export PNG", defaultName, "PNG Files (*.png)"
         )[0]
         if not path:
             return
         try:
-            self._MFT.glyphToPng(self._glyphs[self._selectedSlot], path)
+            if self._selectedSection == "ascii":
+                w = fb.asciiPixelWidth(self._selectedSlot)
+                self._MFT.glyphToPng(fb.asciiGlyphs[self._selectedSlot], path, w)
+            else:
+                self._MFT.glyphToPng(fb.kanaGlyphs[self._selectedSlot], path)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export PNG:\n{e}")
 
     def _exportAll(self):
-        if not self._glyphs:
+        if not self._fontBlock:
             QMessageBox.information(self, "No Data", "Load a STAGE.DIR first.")
             return
         folder = QFileDialog.getExistingDirectory(self, "Export All Glyphs To")
         if not folder:
             return
         try:
-            for i, glyph in enumerate(self._glyphs):
+            fb = self._fontBlock
+            for i, glyph in enumerate(fb.asciiGlyphs):
+                w = fb.asciiPixelWidth(i)
+                self._MFT.glyphToPng(glyph, os.path.join(folder, f"ascii-{i:02d}.png"), w)
+            for i, glyph in enumerate(fb.kanaGlyphs):
                 self._MFT.glyphToPng(glyph, os.path.join(folder, f"glyph-{i:03d}.png"))
-            QMessageBox.information(self, "Done", f"Exported {len(self._glyphs)} glyphs to:\n{folder}")
+            total = fb.asciiCount + fb.kanaCount
+            QMessageBox.information(self, "Done",
+                f"Exported {total} glyphs ({fb.asciiCount} ASCII + {fb.kanaCount} kana) to:\n{folder}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to export glyphs:\n{e}")
 
     def _importFolder(self):
-        if not self._glyphs:
+        if not self._fontBlock:
             QMessageBox.information(self, "No Data", "Load a STAGE.DIR first to establish baseline glyphs.")
             return
         folder = QFileDialog.getExistingDirectory(self, "Import Glyphs From Folder")
         if not folder:
             return
         try:
-            imported = self._MFT.importGlyphsFromFolder(folder)
-            for idx, data in imported.items():
-                self._glyphs[idx] = data
-                self._modifiedSlots.add(idx)
-            self._refreshGrid()
-            QMessageBox.information(self, "Done", f"Imported {len(imported)} glyphs.")
+            fb = self._fontBlock
+            # Import kana glyphs (glyph-NNN.png)
+            kanaImported = self._MFT.importKanaFromFolder(folder, fb.kanaCount)
+            for idx, data in kanaImported.items():
+                fb.kanaGlyphs[idx] = data
+                self._modifiedKanaSlots.add(idx)
+            # Import ASCII glyphs (ascii-NN.png)
+            asciiImported = self._MFT.importAsciiFromFolder(folder)
+            for idx, data in asciiImported.items():
+                fb.asciiGlyphs[idx] = data
+                fb.asciiVfwBytes[idx] = fb.asciiPixelWidth(idx)  # update VFW to match
+                self._modifiedAsciiSlots.add(idx)
+            self._refreshAllGrids()
+            total = len(kanaImported) + len(asciiImported)
+            QMessageBox.information(self, "Done", f"Imported {total} glyphs.")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to import glyphs:\n{e}")
 
     def _applyToStageDir(self):
-        if not self._glyphs:
+        if not self._fontBlock:
             return
         path = QFileDialog.getSaveFileName(
             self, "Save Modified STAGE.DIR",
@@ -703,22 +1016,13 @@ class FontEditorDialog(QDialog):
         if not path:
             return
         try:
-            self._MFT.injectGlyphs(self._stageDirPath, path, self._glyphs)
-            self._modifiedSlots.clear()
-            self._refreshGrid()
+            self._MFT.injectFont(self._stageDirPath, path, self._fontBlock)
+            self._modifiedKanaSlots.clear()
+            self._modifiedAsciiSlots.clear()
+            self._refreshAllGrids()
             QMessageBox.information(self, "Done", f"Font injected into:\n{path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to inject font:\n{e}")
-
-    # ── Public accessors for MainWindow integration ──────────────────────
-
-    @property
-    def tblMapping(self) -> dict[str, str]:
-        return self._tblMapping
-
-    @property
-    def tblRaw(self) -> str:
-        return self._tblTools.tblToString(self._tblMapping)
 
 
 class MainWindow(QMainWindow):
@@ -739,6 +1043,10 @@ class MainWindow(QMainWindow):
         self.ui.menuFile.removeAction(self.ui.actionSave_RADIO_DAT)
         self.ui.actionSave_RADIO_XML.triggered.connect(self.saveRadioXMLFile)
         self.ui.actionSave_RADIO_XML.setStatusTip("Save current edits to RADIO.XML")
+
+        # ── Edit Menu ────────────────────────────────────────────────────────
+        self._appSettings = QSettings("MGS-Undubbed", "DialogueEditor")
+        self.ui.actionPreferences.triggered.connect(self._openPreferences)
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
@@ -789,6 +1097,15 @@ class MainWindow(QMainWindow):
         self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionSaveProjectAs)
 
         self.ui.menuFile.insertSeparator(self.ui.actionLoad_RADIO_DAT)
+
+        # ── Keyboard shortcuts ────────────────────────────────────────────────
+        # Override defaults from the .ui file to match project-centric workflow
+        self.ui.actionLoad_RADIO_DAT.setShortcut("")       # was Ctrl+O
+        self.ui.playVoxButton.setShortcut("")               # was Ctrl+P
+        self.actionOpenFolder.setShortcut("Ctrl+O")
+        self.actionOpenProject.setShortcut("Ctrl+P")
+        self.actionSaveProject.setShortcut("Ctrl+S")
+        self.ui.playVoxButton.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Space))
 
         # ── Add Save/Load VOX and DEMO actions (not in generated form) ────────
         self.actionSave_VOX_DAT = QAction("Save VOX.DAT", self)
@@ -942,29 +1259,64 @@ class MainWindow(QMainWindow):
     # ── UI additions ─────────────────────────────────────────────────────────
 
     def _addEditButtons(self):
-        """Adds Apply Edit, Split Subtitle, and Delete Subtitle buttons below the dialogue editor."""
-        btn_layout = QHBoxLayout()
+        """Adds editing buttons to the right of the timing fields."""
+        # ── Reparent timing widgets into a horizontal layout ──────────────
+        # Remove timing labels + spinboxes from the vertical layout so we
+        # can place them side-by-side with a button column.
+        for w in (self.ui.labelStartFrame, self.ui.startFrameBox,
+                  self.ui.labelDuration, self.ui.durationBox):
+            self.ui.verticalLayout_2.removeWidget(w)
+
+        timingCol = QVBoxLayout()
+        timingCol.addWidget(self.ui.labelStartFrame)
+        timingCol.addWidget(self.ui.startFrameBox)
+        timingCol.addWidget(self.ui.labelDuration)
+        timingCol.addWidget(self.ui.durationBox)
+        timingCol.addStretch()
+
+        # ── Button column (right side) ────────────────────────────────────
+        btnCol = QVBoxLayout()
 
         self.applyEditButton = QPushButton("Apply Edit")
-        self.applyEditButton.setToolTip("Save text and timing changes to the loaded XML")
+        self.applyEditButton.setToolTip("Save text and timing changes (Cmd+Enter)")
         self.applyEditButton.setEnabled(False)
+        self.applyEditButton.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return))
         self.applyEditButton.clicked.connect(self.applyEdit)
-        btn_layout.addWidget(self.applyEditButton)
+        btnCol.addWidget(self.applyEditButton)
 
         self.splitSubButton = QPushButton("Split Subtitle")
         self.splitSubButton.setToolTip("Split this subtitle in two, halving the display duration")
         self.splitSubButton.setEnabled(False)
         self.splitSubButton.clicked.connect(self.splitSubtitle)
-        btn_layout.addWidget(self.splitSubButton)
+        btnCol.addWidget(self.splitSubButton)
 
         self.deleteSubButton = QPushButton("Delete Subtitle")
         self.deleteSubButton.setToolTip("Remove this subtitle from the call")
         self.deleteSubButton.setEnabled(False)
         self.deleteSubButton.clicked.connect(self.deleteSubtitle)
-        btn_layout.addWidget(self.deleteSubButton)
+        btnCol.addWidget(self.deleteSubButton)
 
-        # Insert below the durationBox inside groupBox's layout
-        self.ui.verticalLayout_2.addLayout(btn_layout)
+        self.translateButton = QPushButton("Translate")
+        self.translateButton.setToolTip("Translate the current line (Cmd+T)")
+        self.translateButton.setEnabled(False)
+        self.translateButton.setShortcut("Ctrl+T")
+        self.translateButton.clicked.connect(self._translateLine)
+        btnCol.addWidget(self.translateButton)
+
+        self.autoFormatButton = QPushButton("Auto-format")
+        self.autoFormatButton.setToolTip("Re-wrap text with pixel-accurate MGS1 line breaks (Cmd+F)")
+        self.autoFormatButton.setEnabled(False)
+        self.autoFormatButton.setShortcut("Ctrl+F")
+        self.autoFormatButton.clicked.connect(self._autoFormatLine)
+        btnCol.addWidget(self.autoFormatButton)
+
+        btnCol.addStretch()
+
+        # ── Combine timing + buttons in a horizontal row ──────────────────
+        bottomRow = QHBoxLayout()
+        bottomRow.addLayout(timingCol)
+        bottomRow.addLayout(btnCol)
+        self.ui.verticalLayout_2.addLayout(bottomRow)
 
         # ── Stop button — inserted into the StatusBar row next to Play ────────
         self.stopVoxButton = QPushButton("Stop")
@@ -1307,8 +1659,9 @@ class MainWindow(QMainWindow):
         self._loadingSubtitle = False
 
         self.applyEditButton.setEnabled(True)
-        # Split/Delete only supported in radio mode for now
-        self.splitSubButton.setEnabled(self._editorMode == "radio")
+        self.translateButton.setEnabled(True)
+        self.autoFormatButton.setEnabled(True)
+        self.splitSubButton.setEnabled(True)
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
@@ -1376,60 +1729,166 @@ class MainWindow(QMainWindow):
         newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "\\r\\n")
         radioManager.updateSubText(currentSubIndex, newText)
 
-        # --- Timing → VOX demo -----------------------------------------------
+        # --- Timing + text → VOX demo -----------------------------------------
         lines = self._getVoxSubtitleLines()
         if lines and currentSubIndex < len(lines):
             lines[currentSubIndex].startFrame = self.ui.startFrameBox.value()
             lines[currentSubIndex].displayFrames = self.ui.durationBox.value()
+            lines[currentSubIndex].text = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
 
         # Refresh subtitle list to show new text
         self._modified = True
         self._refreshSubsList()
         self.applyEditButton.setStyleSheet("")
-        self.statusBar().showMessage("Changes applied (unsaved — use File → Save RADIO.XML)", 5000)
+        if projectFilePath:
+            self.statusBar().showMessage("Changes applied (unsaved — use File → Save Project)", 5000)
+        else:
+            self.statusBar().showMessage("Changes applied (unsaved — use File → Save RADIO.XML or Save Project As)", 5000)
+
+    # ── Translate / Auto-format helpers ─────────────────────────────────────
+
+    def _openPreferences(self):
+        """Show the Preferences dialog."""
+        dlg = PreferencesDialog(self._appSettings, parent=self)
+        dlg.exec()
+
+    def _translateLine(self):
+        """Translate the current editor text using deep_translator."""
+        text = self.ui.DialogueEditorBox.toPlainText().strip()
+        if not text:
+            return
+        try:
+            from deep_translator import GoogleTranslator
+        except ImportError:
+            QMessageBox.warning(self, "Missing Dependency",
+                "Install deep_translator to use translation:\n\n"
+                "  pip install deep-translator")
+            return
+
+        # Strip line-break markers that confuse the translator
+        clean = text.replace("\\r\\n", " ").replace("｜", " ")
+        clean = " ".join(clean.split())
+
+        srcLang = self._appSettings.value("translate/source_lang", "ja")
+        tgtLang = self._appSettings.value("translate/target_lang", "en")
+        self.statusBar().showMessage(f"Translating ({srcLang} → {tgtLang})...")
+        QApplication.processEvents()
+        try:
+            result = GoogleTranslator(source=srcLang, target=tgtLang).translate(clean)
+            if result:
+                self.ui.DialogueEditorBox.setPlainText(result)
+                self.applyEditButton.setStyleSheet("color: orange;")
+                self.statusBar().showMessage("Translation complete", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "Translation Error", str(e))
+            self.statusBar().clearMessage()
+
+    # Default MGS1 ASCII character widths (pixels), from original_widths.txt
+    # Index 0 = space (0x20), through to index 94 = '~' (0x7E)
+    _MGS_WIDTHS = {
+        ' ': 4, '!': 5, '"': 5, '#': 12, '$': 7, '%': 10, '&': 8, "'": 3,
+        '(': 3, ')': 3, '*': 5, '+': 8, ',': 3, '-': 5, '.': 3, '/': 6,
+        '0': 7, '1': 7, '2': 7, '3': 7, '4': 7, '5': 7, '6': 7, '7': 7,
+        '8': 7, '9': 7, ':': 3, ';': 3, '<': 4, '=': 8, '>': 4, '?': 8,
+        '@': 5, 'A': 8, 'B': 9, 'C': 9, 'D': 9, 'E': 8, 'F': 8, 'G': 10,
+        'H': 9, 'I': 4, 'J': 7, 'K': 9, 'L': 8, 'M': 11, 'N': 9, 'O': 10,
+        'P': 8, 'Q': 10, 'R': 9, 'S': 8, 'T': 8, 'U': 9, 'V': 8, 'W': 12,
+        'X': 8, 'Y': 8, 'Z': 8, '[': 3, '\\': 8, ']': 3, '^': 4, '_': 6,
+        '`': 3, 'a': 7, 'b': 8, 'c': 7, 'd': 8, 'e': 8, 'f': 4, 'g': 8,
+        'h': 7, 'i': 3, 'j': 3, 'k': 7, 'l': 3, 'm': 10, 'n': 7, 'o': 7,
+        'p': 8, 'q': 8, 'r': 4, 's': 6, 't': 4, 'u': 7, 'v': 6, 'w': 9,
+        'x': 6, 'y': 6, 'z': 6, '{': 2, '|': 2, '}': 2, '~': 5,
+    }
+
+    def _autoFormatLine(self):
+        """Re-wrap the current editor text using MGS1 pixel-width-aware line breaks."""
+        from scripts.translation.mgs_font_text import wrap_text
+
+        text = self.ui.DialogueEditorBox.toPlainText()
+        if not text.strip():
+            return
+
+        # Flatten existing line breaks to plain text
+        flat = text.replace("\n", " ").replace("｜", " ")
+        # Collapse multiple spaces
+        flat = " ".join(flat.split())
+
+        lines = wrap_text(flat, self._MGS_WIDTHS)
+        self.ui.DialogueEditorBox.setPlainText("\n".join(lines))
+        self.applyEditButton.setStyleSheet("color: orange;")
+        self.statusBar().showMessage(
+            f"Auto-formatted: {len(lines)} line(s), "
+            f"max {max(sum(self._MGS_WIDTHS.get(c, 0) for c in ln) for ln in lines)}px",
+            5000)
+
+    _SPLIT_GAP_FRAMES = 2  # frames between the two halves
 
     def splitSubtitle(self):
         """
-        Splits the selected subtitle in two:
-        - Radio XML: first half of text becomes this entry, second half is inserted after
-        - VOX timings: duration is split 50/50 if a VOX demo is loaded
+        Duplicate the selected subtitle and split the timing:
+        - First keeps same text, duration ≈ half the original
+        - Second starts a few frames after the first ends, same text,
+          duration adjusted so it ends on the original end frame
         """
         global currentSubIndex
         if currentSubIndex < 0:
             return
 
-        subs = radioManager.getSubs()
-        text = subs[currentSubIndex]
-        # Attempt to split on \r\n first, then at midpoint
-        if "\\r\\n" in text:
-            parts = text.split("\\r\\n", 1)
-        else:
-            mid = len(text) // 2
-            parts = [text[:mid], text[mid:]]
+        gap = self._SPLIT_GAP_FRAMES
 
-        # Update first subtitle
-        radioManager.updateSubText(currentSubIndex, parts[0])
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            key, djson = self._modeData()
+            subtitles = djson.get(key, {})
+            sortedFrames = sorted(subtitles.keys(), key=int)
+            if currentSubIndex >= len(sortedFrames):
+                return
+            frame = sortedFrames[currentSubIndex]
+            sub = subtitles[frame]
+            text = sub.get("text", "")
+            origStart = int(frame)
+            origDur = int(sub.get("duration", "0"))
+            origEnd = origStart + origDur
 
-        # Insert second subtitle after current
-        radioManager.addSubtitle(currentSubIndex, parts[1], after=True)
+            halfDur = origDur // 2
+            secondStart = origStart + halfDur + gap
+            secondDur = max(1, origEnd - secondStart)
+
+            # Update first entry's duration
+            subtitles[frame] = {"duration": str(halfDur), "text": text}
+            # Insert second entry
+            subtitles[str(secondStart)] = {"duration": str(secondDur), "text": text}
+
+            self._modified = True
+            self._refreshSubsList()
+            self.ui.subsPreviewList.setCurrentRow(currentSubIndex)
+            self.statusBar().showMessage("Subtitle split", 3000)
+            return
+
+        # ── Radio mode ────────────────────────────────────────────────────
+        text = radioManager.getSubs()[currentSubIndex]
+
+        # Duplicate text into both entries
+        radioManager.addSubtitle(currentSubIndex, text, after=True)
 
         # Split VOX timing if loaded
         lines = self._getVoxSubtitleLines()
         if lines and currentSubIndex < len(lines):
             orig_line = lines[currentSubIndex]
-            orig_start = orig_line.startFrame
-            orig_dur = orig_line.displayFrames
-            half_dur = orig_dur // 2
+            origStart = orig_line.startFrame
+            origDur = orig_line.displayFrames
+            origEnd = origStart + origDur
 
-            orig_line.displayFrames = half_dur
+            halfDur = origDur // 2
+            secondStart = origStart + halfDur + gap
+            secondDur = max(1, origEnd - secondStart)
 
-            # Insert a new dialogueLine after in the captionChunk
-            self._insertVoxLine(currentSubIndex, orig_start + half_dur, half_dur, parts[1])
+            orig_line.displayFrames = halfDur
+            self._insertVoxLine(currentSubIndex, secondStart, secondDur, text)
 
+        self._modified = True
         self._refreshSubsList()
-        # Re-select the first of the two new entries
         self.ui.subsPreviewList.setCurrentRow(currentSubIndex)
-        self.statusBar().showMessage("Subtitle split — remember to save XML and VOX", 5000)
+        self.statusBar().showMessage("Subtitle split", 3000)
 
     def deleteSubtitle(self):
         """Remove the currently selected subtitle from the XML."""
@@ -1507,6 +1966,8 @@ class MainWindow(QMainWindow):
         self.applyEditButton.setStyleSheet("")
         self.splitSubButton.setEnabled(False)
         self.deleteSubButton.setEnabled(False)
+        self.translateButton.setEnabled(False)
+        self.autoFormatButton.setEnabled(False)
 
     # ── Audio ─────────────────────────────────────────────────────────────────
 
@@ -1594,6 +2055,10 @@ class MainWindow(QMainWindow):
             self._zmovieConvThread.killSubprocess()
             self._zmovieConvThread.requestInterruption()
             self._zmovieConvThread.wait(2000)
+        # Stop QMediaPlayer and release file handles so temp files can be reused
+        if hasattr(self, '_mediaPlayer'):
+            self._mediaPlayer.stop()
+            self._mediaPlayer.setSource(QUrl())
         self._stopPreview()
         self._showGraphicsHideVideo()
         self._resetPlaybackButtons()
@@ -1670,6 +2135,7 @@ class MainWindow(QMainWindow):
 
     def _onPlaybackError(self, msg: str):
         self._stopPreview()
+        self._showGraphicsHideVideo()
         self._resetPlaybackButtons()
         self.statusBar().showMessage(f"Audio error: {msg}", 5000)
 
@@ -2093,8 +2559,8 @@ class MainWindow(QMainWindow):
                 projectFolder = os.path.dirname(path)
                 break
 
-        stageDirAutoPath = ""
-        if projectFolder:
+        stageDirAutoPath = projectSettings.get("stage_dir_path", "")
+        if not stageDirAutoPath and projectFolder:
             for name in os.listdir(projectFolder):
                 if name.upper() == "STAGE.DIR":
                     stageDirAutoPath = os.path.join(projectFolder, name)
@@ -2160,7 +2626,7 @@ class MainWindow(QMainWindow):
                     else:
                         radioOut = os.path.join(projectFolder or tmpDir, "RADIO-NEW.DAT")
 
-                    stagePath = dlg.stageDirPath or None
+                    stagePath = (dlg.stageDirPath or None) if dlg.stageEnabled else None
                     if dlg.replaceOriginals and stagePath:
                         stageOut = dlg.stageOutName or stagePath
                     elif stagePath:
@@ -2319,6 +2785,8 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setVisible(False)
         self.ui.VoxAddressLabel.setVisible(False)
         self.ui.VoxAddressDisplay.setVisible(False)
+        self.chkDisc1Only.setVisible(False)
+        self.chkUnclaimedVox.setVisible(False)
 
     def _switchToDemoMode(self):
         self._editorMode = "demo"
@@ -2356,7 +2824,6 @@ class MainWindow(QMainWindow):
         self._syncTab()
         self._hideRadioWidgets()
         self.ui.playVoxButton.setEnabled(bool(voxDialogueJson))
-        self.chkDisc1Only.setVisible(False)
         self.chkUnclaimedVox.setVisible(bool(_radioClaimedVoxAddrs))
         self._populateVoxOffsets()
         self._clearEditor()
@@ -2417,10 +2884,13 @@ class MainWindow(QMainWindow):
         if not folder:
             return
 
-        radioPath   = self._findFileInFolder(folder, "RADIO.DAT")
-        demoPath    = self._findFileInFolder(folder, "DEMO.DAT")
-        voxPath     = self._findFileInFolder(folder, "VOX.DAT")
-        zmoviePath  = self._findFileInFolder(folder, "ZMOVIE.STR")
+        radioPath    = self._findFileInFolder(folder, "RADIO.DAT")
+        demoPath     = self._findFileInFolder(folder, "DEMO.DAT")
+        voxPath      = self._findFileInFolder(folder, "VOX.DAT")
+        zmoviePath   = self._findFileInFolder(folder, "ZMOVIE.STR")
+        brfPath      = self._findFileInFolder(folder, "BRF.DAT")
+        facePath     = self._findFileInFolder(folder, "FACE.DAT")
+        stageDirPath = self._findFileInFolder(folder, "STAGE.DIR")
 
         missing = [n for n, p in [
             ("RADIO.DAT",  radioPath),
@@ -2437,7 +2907,9 @@ class MainWindow(QMainWindow):
             )
         if not radioPath and not demoPath and not voxPath and not zmoviePath:
             return
-        self._loadAllFromFolder(radioPath, demoPath, voxPath, zmoviePath)
+        self._loadAllFromFolder(radioPath, demoPath, voxPath, zmoviePath,
+                                brfPath=brfPath, facePath=facePath,
+                                stageDirPath=stageDirPath)
 
     def _findFileInFolder(self, folder: str, name: str) -> str:
         """Case-insensitive file search in a folder. Returns full path or empty string."""
@@ -2450,7 +2922,8 @@ class MainWindow(QMainWindow):
             pass
         return ""
 
-    def _loadAllFromFolder(self, radioPath: str, demoPath: str, voxPath: str, zmoviePath: str = ""):
+    def _loadAllFromFolder(self, radioPath: str, demoPath: str, voxPath: str, zmoviePath: str = "",
+                           brfPath: str = "", facePath: str = "", stageDirPath: str = ""):
         global projectSettings
         errors = []
 
@@ -2491,6 +2964,9 @@ class MainWindow(QMainWindow):
             "demo_dat_path":    demoPath    or "",
             "vox_dat_path":     voxPath     or "",
             "zmovie_str_path":  zmoviePath  or "",
+            "brf_dat_path":     brfPath      or "",
+            "face_dat_path":    facePath     or "",
+            "stage_dir_path":   stageDirPath or "",
         }
 
         if errors:
