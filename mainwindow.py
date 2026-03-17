@@ -1569,13 +1569,17 @@ class MainWindow(QMainWindow):
 
         self._clearEditor()
 
-        # If the call has no VOX_CUES (e.g. staff calls), load its SUBTITLE
-        # elements directly so the subtitle list isn't left blank.
-        if self.ui.audioCueListView.count() == 0:
+        if self.ui.audioCueListView.count() > 0:
+            # Auto-select first VOX cue — fires selectAudioCue which populates subtitles
+            self.ui.audioCueListView.setCurrentRow(0)
+        else:
+            # No VOX_CUES (e.g. staff calls): load SUBTITLE elements directly from the call
             self.ui.subsPreviewList.clear()
             for sub in radioManager.workingCall.findall("SUBTITLE"):
                 text = sub.get("text", "")
                 QListWidgetItem(text, self.ui.subsPreviewList)
+            if self.ui.subsPreviewList.count() > 0:
+                self.ui.subsPreviewList.setCurrentRow(0)
 
     def _selectDemo(self, index):
         global currentDemoKey, currentSubIndex
