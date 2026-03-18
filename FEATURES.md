@@ -5,7 +5,8 @@
 ### Project File (.mtp)
 - **Open Folder** — scan a folder case-insensitively for RADIO.DAT, DEMO.DAT, VOX.DAT, ZMOVIE.STR and load all found at once
 - **Open Project (.mtp)** — restore all subtitle edits and attempt to reload audio from stored DAT paths; prompts to relocate missing DATs
-- **Save Project / Save Project As** — ZIP archive containing settings.json, radio.xml, demo-dialogue.json, vox-dialogue.json, zmovie-dialogue.json
+- **Save Project / Save Project As** — ZIP archive containing settings.json, radio.xml, {demo,vox,zmovie}-original.json, {demo,vox,zmovie}-altered.json, {vox,demo}-offsets.json, font.tbl
+- **Backward compatibility** — old `.mtp` files with single `*-dialogue.json` are migrated on open (treated as original with no alterations)
 - **Quick-access buttons** — Open Folder, Open Project, and Finalize Project buttons in the lower-right panel for one-click access without opening the menu
 
 ### Editor Modes
@@ -23,12 +24,17 @@
 - **This disc filter** — "This disc only" checkbox hides calls where any VOX_CUES has a zero block address (missing audio); checkbox only appears when such calls are present
 
 ### Demo / VOX / ZMovie Editing
+- **Original/Altered JSON split** — extracted data is stored as a read-only original; edits are tracked separately in a sparse "altered" JSON containing only modified entries. Unchanged entries are never touched during compile, preserving original Japanese text from recompiler encoding issues.
+- **Altered entry markers** — entries with modifications are marked with a bullet (•) in the offset dropdown for at-a-glance visibility
+- **Revert to Original** — per-entry button to discard changes and restore the original extracted data; optional confirmation warning (configurable in Preferences > Editor)
 - **Unclaimed VOX filter** — "Show unclaimed clips only" checkbox in VOX mode hides clips whose byte offset is referenced by a RADIO call; only appears when RADIO has been loaded
 - Extract subtitle timing/text from DEMO.DAT, VOX.DAT, or ZMOVIE.STR without pre-splitting
 - Edit start frame, duration, and text per subtitle entry
-- Apply edits to in-memory JSON (re-keyed on frame change)
-- Export dialogue to JSON file (Demo, VOX, ZMovie)
+- Apply edits via copy-on-write: first edit to an entry copies it from original into altered, then mutates the altered copy
+- Export dialogue to JSON file — exports only altered entries (Demo, VOX, ZMovie)
+- Compile patches only altered entries into the output file; unmodified entries keep their original binary data
 - ZMovie: patch-in-place compile back to ZMOVIE.STR via extractZmovie; raises clear error on subtitle overflow
+- **Offsets JSON** — VOX and DEMO extraction builds an offsets.json mapping entry numbers to hex byte offsets for STAGE.DIR adjustment; saved in the .mtp project file
 
 ### Finalize Project
 - **Finalize Project dialog** — batch-compile all (or selected) game data files in one step

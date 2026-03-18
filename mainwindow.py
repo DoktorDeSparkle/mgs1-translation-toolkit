@@ -40,18 +40,41 @@ demoOriginalData: bytes = b''
 demoFilePath: str = ""
 currentDemoKey: str = ""       # sequential name, e.g. "demo-01"
 currentVoxKey:  str = ""       # sequential name, e.g. "vox-0001"
-demoDialogueJson: dict = {}    # {"demo-01": {"1234": {"duration": "...", "text": "..."}}}
-demoSeqToOffset: dict = {}     # {"demo-01": "12345"} — maps name → raw offset string
+demoOriginalJson: dict = {}    # {"demo-01": {...}} — read-only reference from extraction
+demoAlteredJson:  dict = {}    # {"demo-01": {...}} — only user-modified entries (sparse)
+demoOffsetsJson:  dict = {}    # {"01": "00003800"} — offset map for STAGE.DIR adjustment
+demoSeqToOffset:  dict = {}    # {"demo-01": "12345"} — maps name → raw offset string
 
 # VOX mode state (mirrors demo mode)
-voxDialogueJson: dict = {}     # {"vox-0001": {"1234": {"duration": "...", "text": "..."}}}
+voxOriginalJson: dict = {}     # {"vox-0001": {...}} — read-only reference from extraction
+voxAlteredJson:  dict = {}     # {"vox-0001": {...}} — only user-modified entries (sparse)
+voxOffsetsJson:  dict = {}     # {"0001": "00003800"} — offset map for STAGE.DIR adjustment
 voxSeqToOffset:  dict = {}     # {"vox-0001": "12345"} — maps name → raw offset string
 
 # ZMovie mode state
-zmovieDialogueJson: dict  = {}   # {"zmovie-00": {"1234": {"duration": "...", "text": "..."}}}
+zmovieOriginalJson: dict  = {}   # {"zmovie-00": {...}} — read-only reference from extraction
+zmovieAlteredJson:  dict  = {}   # {"zmovie-00": {...}} — only user-modified entries (sparse)
 zmovieOriginalData: bytes = b''  # original ZMOVIE.STR bytes for patch-in-place compile
 zmovieFilePath:     str   = ""
 currentZmovieKey:   str   = ""   # e.g. "zmovie-00"
+
+def _mergedZmovieJson() -> dict:
+    """Return zmovieOriginalJson with zmovieAlteredJson overlaid (altered takes priority)."""
+    merged = dict(zmovieOriginalJson)
+    merged.update(zmovieAlteredJson)
+    return merged
+
+def _mergedDemoJson() -> dict:
+    """Return demoOriginalJson with demoAlteredJson overlaid (altered takes priority)."""
+    merged = dict(demoOriginalJson)
+    merged.update(demoAlteredJson)
+    return merged
+
+def _mergedVoxJson() -> dict:
+    """Return voxOriginalJson with voxAlteredJson overlaid (altered takes priority)."""
+    merged = dict(voxOriginalJson)
+    merged.update(voxAlteredJson)
+    return merged
 
 # Radio/VOX cross-reference index (built when RADIO XML loads)
 _radioDisc2Offsets:    set = set()  # call offsets where any VOX_CUES has a zero block address
@@ -322,6 +345,18 @@ class PreferencesDialog(QDialog):
         transGroup.setLayout(transLayout)
         layout.addWidget(transGroup)
 
+        # ── Editor section ───────────────────────────────────────────────
+        editorGroup = QGroupBox("Editor")
+        editorLayout = QVBoxLayout()
+
+        self.chkRevertWarn = QCheckBox("Warn before reverting to original")
+        self.chkRevertWarn.setChecked(
+            settings.value("editor/warn_on_revert", True, type=bool))
+        editorLayout.addWidget(self.chkRevertWarn)
+
+        editorGroup.setLayout(editorLayout)
+        layout.addWidget(editorGroup)
+
         # ── Buttons ───────────────────────────────────────────────────────
         btnRow = QHBoxLayout()
         btnOk = QPushButton("OK")
@@ -340,6 +375,8 @@ class PreferencesDialog(QDialog):
                                 self.comboTargetLang.currentData())
         self._settings.setValue("translate/source_lang",
                                 self.comboSourceLang.currentData())
+        self._settings.setValue("editor/warn_on_revert",
+                                self.chkRevertWarn.isChecked())
         super().accept()
 
 
@@ -1321,6 +1358,12 @@ class MainWindow(QMainWindow):
         self.deleteSubButton.clicked.connect(self.deleteSubtitle)
         btnCol.addWidget(self.deleteSubButton)
 
+        self.revertVoxButton = QPushButton("Revert to Original")
+        self.revertVoxButton.setToolTip("Discard changes and restore the original VOX entry")
+        self.revertVoxButton.setVisible(False)
+        self.revertVoxButton.clicked.connect(self._revertVoxEntry)
+        btnCol.addWidget(self.revertVoxButton)
+
         self.translateButton = QPushButton("Translate")
         self.translateButton.setToolTip("Translate the current line (Cmd+T)")
         self.translateButton.setEnabled(False)
@@ -1446,15 +1489,18 @@ class MainWindow(QMainWindow):
     def _populateVoxOffsets(self):
         """Repopulate the VOX offset list, optionally showing only unclaimed clips."""
         filterUnclaimed = self.chkUnclaimedVox.isChecked()
+        merged = _mergedVoxJson()
         current = self.ui.offsetListBox.currentData()
         self.ui.offsetListBox.blockSignals(True)
         self.ui.offsetListBox.clear()
-        for name in sorted(voxDialogueJson.keys()):
+        for name in sorted(merged.keys()):
             if filterUnclaimed:
                 offset = voxSeqToOffset.get(name)
                 if offset and int(offset) in _radioClaimedVoxAddrs:
                     continue
-            self.ui.offsetListBox.addItem(name, userData=name)
+            # Mark altered entries with a bullet
+            label = f"\u2022 {name}" if name in voxAlteredJson else name
+            self.ui.offsetListBox.addItem(label, userData=name)
         self.ui.offsetListBox.blockSignals(False)
         idx = self.ui.offsetListBox.findData(current)
         self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
@@ -1467,21 +1513,28 @@ class MainWindow(QMainWindow):
         self._switchToVoxMode()
 
     def _loadVoxFromPath(self, voxFile: str):
-        global voxManager, voxOriginalData, voxFilePath, voxDialogueJson, voxSeqToOffset
+        global voxManager, voxOriginalData, voxFilePath
+        global voxOriginalJson, voxAlteredJson, voxOffsetsJson, voxSeqToOffset
         voxOriginalData = open(voxFile, 'rb').read()
         voxFilePath = voxFile
         voxManager = DM.parseDemoFile(voxOriginalData)
         try:
             from DemoTools.extractDemoVox import extractFromFile
-            voxDialogueJson = extractFromFile(voxFile, fileType='vox')
+            voxOriginalJson = extractFromFile(voxFile, fileType='vox')
         except Exception as e:
             print(f"Warning: VOX dialogue extraction failed: {e}")
-            voxDialogueJson = {}
+            voxOriginalJson = {}
+        voxAlteredJson = {}  # fresh load, no edits yet
         sortedOffsets = sorted(voxManager.keys(), key=lambda k: int(k))
         voxSeqToOffset = {f"vox-{i + 1:04}": off for i, off in enumerate(sortedOffsets)}
+        # Build offsets.json for STAGE.DIR adjustment
+        voxOffsetsJson = {}
+        for name, off in voxSeqToOffset.items():
+            num = name.replace("vox-", "")
+            voxOffsetsJson[num] = f"{int(off):08x}"
         self.ui.playVoxButton.setEnabled(True)
         self.statusBar().showMessage(
-            f"VOX.DAT loaded: {len(voxManager)} clips, {len(voxDialogueJson)} with dialogue", 4000
+            f"VOX.DAT loaded: {len(voxManager)} clips, {len(voxOriginalJson)} with dialogue", 4000
         )
 
     def saveRadioXMLFile(self):
@@ -1512,11 +1565,14 @@ class MainWindow(QMainWindow):
 
     def saveVoxDatFile(self):
         """
-        Patch-in-place: serialise any modified captionChunks back into a copy of the
-        original VOX bytes, then write the result to disk.
+        Patch-in-place: sync only altered entries, then serialise modified captionChunks
+        back into a copy of the original VOX bytes and write to disk.
         """
         if not voxManager or not voxOriginalData:
             QMessageBox.warning(self, "Nothing loaded", "No VOX.DAT is currently loaded.")
+            return
+        if not voxAlteredJson:
+            QMessageBox.warning(self, "No changes", "No VOX entries have been modified.")
             return
 
         filename = QFileDialog.getSaveFileName(
@@ -1526,22 +1582,26 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            self._syncJsonToManager(voxAlteredJson, voxSeqToOffset, voxManager)
+            alteredOffsets = set()
+            for key in voxAlteredJson:
+                off = voxSeqToOffset.get(key)
+                if off:
+                    alteredOffsets.add(int(off))
+
             patchedData = bytearray(voxOriginalData)
+            sortedOffsets = sorted(int(k) for k in voxManager)
 
-            # Sort demos by byte offset so we process in file order
-            for offsetStr, demoObj in sorted(voxManager.items(), key=lambda x: int(x[0])):
-                byteOffset = int(offsetStr)
-                # Find the original length of this demo in the file
-                # (distance to the next demo, or end-of-file)
-                sortedOffsets = sorted(int(k) for k in voxManager)
-                idx = sortedOffsets.index(byteOffset)
-                if idx + 1 < len(sortedOffsets):
-                    origLen = sortedOffsets[idx + 1] - byteOffset
-                else:
-                    origLen = len(voxOriginalData) - byteOffset
-
+            for i, byteOffset in enumerate(sortedOffsets):
+                if byteOffset not in alteredOffsets:
+                    continue  # skip unmodified — keep original bytes
+                origLen = (
+                    sortedOffsets[i + 1] - byteOffset
+                    if i + 1 < len(sortedOffsets)
+                    else len(voxOriginalData) - byteOffset
+                )
                 origSlice = bytes(voxOriginalData[byteOffset: byteOffset + origLen])
-                newSlice = demoObj.getModifiedBytes(origSlice)
+                newSlice = voxManager[str(byteOffset)].getModifiedBytes(origSlice)
 
                 if len(newSlice) != origLen:
                     QMessageBox.critical(
@@ -1555,7 +1615,8 @@ class MainWindow(QMainWindow):
 
             with open(filename, 'wb') as f:
                 f.write(bytes(patchedData))
-            self.statusBar().showMessage(f"VOX.DAT saved: {filename}", 5000)
+            self.statusBar().showMessage(
+                f"VOX.DAT saved ({len(alteredOffsets)} entries patched): {filename}", 5000)
 
         except Exception as e:
             QMessageBox.critical(self, "VOX Save Error", str(e))
@@ -1627,11 +1688,16 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        subtitles = demoDialogueJson.get(key, {})
+        # Prefer altered, fall back to original
+        subtitles = demoAlteredJson.get(key, demoOriginalJson.get(key, {}))
         for startFrame in sorted(subtitles.keys(), key=int):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
             QListWidgetItem(text, self.ui.subsPreviewList)
+        # Enable revert button only if this entry has been altered
+        self.revertVoxButton.setVisible(self._editorMode == "demo" and key in demoAlteredJson)
+        if self.ui.subsPreviewList.count() > 0:
+            self.ui.subsPreviewList.setCurrentRow(0)
 
     def _selectZmovie(self, index):
         global currentZmovieKey, currentSubIndex
@@ -1644,11 +1710,15 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        subtitles = zmovieDialogueJson.get(key, {})
+        # Prefer altered, fall back to original
+        subtitles = zmovieAlteredJson.get(key, zmovieOriginalJson.get(key, {}))
         for startFrame in sorted(subtitles.keys(), key=int):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
             QListWidgetItem(text, self.ui.subsPreviewList)
+        self.revertVoxButton.setVisible(self._editorMode == "zmovie" and key in zmovieAlteredJson)
+        if self.ui.subsPreviewList.count() > 0:
+            self.ui.subsPreviewList.setCurrentRow(0)
 
     def _selectVox(self, index):
         global currentVoxKey, currentSubIndex
@@ -1661,11 +1731,16 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        subtitles = voxDialogueJson.get(key, {})
+        # Prefer altered, fall back to original
+        subtitles = voxAlteredJson.get(key, voxOriginalJson.get(key, {}))
         for startFrame in sorted(subtitles.keys(), key=int):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
             QListWidgetItem(text, self.ui.subsPreviewList)
+        # Enable revert button only if this entry has been altered
+        self.revertVoxButton.setVisible(self._editorMode == "vox" and key in voxAlteredJson)
+        if self.ui.subsPreviewList.count() > 0:
+            self.ui.subsPreviewList.setCurrentRow(0)
 
     def selectAudioCue(self, item):
         global currentSubIndex, currentVoxOffset
@@ -1781,8 +1856,24 @@ class MainWindow(QMainWindow):
         savedIdx = currentSubIndex  # snapshot before any signal can mutate the global
 
         if self._editorMode in ("demo", "vox", "zmovie"):
-            key, djson = self._modeData()
-            subtitles = djson.get(key, {})
+            if self._editorMode == "vox":
+                key = currentVoxKey
+                if key not in voxAlteredJson:
+                    orig = voxOriginalJson.get(key, {})
+                    voxAlteredJson[key] = json.loads(json.dumps(orig))
+                subtitles = voxAlteredJson[key]
+            elif self._editorMode == "demo":
+                key = currentDemoKey
+                if key not in demoAlteredJson:
+                    orig = demoOriginalJson.get(key, {})
+                    demoAlteredJson[key] = json.loads(json.dumps(orig))
+                subtitles = demoAlteredJson[key]
+            else:  # zmovie
+                key = currentZmovieKey
+                if key not in zmovieAlteredJson:
+                    orig = zmovieOriginalJson.get(key, {})
+                    zmovieAlteredJson[key] = json.loads(json.dumps(orig))
+                subtitles = zmovieAlteredJson[key]
             sortedFrames = sorted(subtitles.keys(), key=int)
             newStart = str(self.ui.startFrameBox.value())
             if savedIdx < len(sortedFrames):
@@ -1798,6 +1889,16 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Changes applied (unsaved \u2014 use File \u2192 Export {label} JSON)", 5000
             )
+            # Update revert button visibility and offset list markers
+            if self._editorMode == "vox":
+                self.revertVoxButton.setVisible(key in voxAlteredJson)
+                self._populateVoxOffsets()
+            elif self._editorMode == "demo":
+                self.revertVoxButton.setVisible(key in demoAlteredJson)
+                self._populateDemoOffsets()
+            elif self._editorMode == "zmovie":
+                self.revertVoxButton.setVisible(key in zmovieAlteredJson)
+                self._populateZmovieOffsets()
             nextRow = min(savedIdx + 1, self.ui.subsPreviewList.count() - 1)
             self.ui.subsPreviewList.setCurrentRow(nextRow)
             return
@@ -1917,8 +2018,24 @@ class MainWindow(QMainWindow):
         gap = self._SPLIT_GAP_FRAMES
 
         if self._editorMode in ("demo", "vox", "zmovie"):
-            key, djson = self._modeData()
-            subtitles = djson.get(key, {})
+            if self._editorMode == "vox":
+                key = currentVoxKey
+                if key not in voxAlteredJson:
+                    orig = voxOriginalJson.get(key, {})
+                    voxAlteredJson[key] = json.loads(json.dumps(orig))
+                subtitles = voxAlteredJson[key]
+            elif self._editorMode == "demo":
+                key = currentDemoKey
+                if key not in demoAlteredJson:
+                    orig = demoOriginalJson.get(key, {})
+                    demoAlteredJson[key] = json.loads(json.dumps(orig))
+                subtitles = demoAlteredJson[key]
+            else:  # zmovie
+                key = currentZmovieKey
+                if key not in zmovieAlteredJson:
+                    orig = zmovieOriginalJson.get(key, {})
+                    zmovieAlteredJson[key] = json.loads(json.dumps(orig))
+                subtitles = zmovieAlteredJson[key]
             sortedFrames = sorted(subtitles.keys(), key=int)
             if currentSubIndex >= len(sortedFrames):
                 return
@@ -1940,6 +2057,15 @@ class MainWindow(QMainWindow):
 
             self._modified = True
             self._refreshSubsList()
+            if self._editorMode == "vox":
+                self.revertVoxButton.setVisible(key in voxAlteredJson)
+                self._populateVoxOffsets()
+            elif self._editorMode == "demo":
+                self.revertVoxButton.setVisible(key in demoAlteredJson)
+                self._populateDemoOffsets()
+            elif self._editorMode == "zmovie":
+                self.revertVoxButton.setVisible(key in zmovieAlteredJson)
+                self._populateZmovieOffsets()
             self.ui.subsPreviewList.setCurrentRow(currentSubIndex)
             self.statusBar().showMessage("Subtitle split", 3000)
             return
@@ -1969,6 +2095,40 @@ class MainWindow(QMainWindow):
         self._refreshSubsList()
         self.ui.subsPreviewList.setCurrentRow(currentSubIndex)
         self.statusBar().showMessage("Subtitle split", 3000)
+
+    def _revertVoxEntry(self):
+        """Revert the current entry to its original state, discarding alterations."""
+        if self._editorMode == "vox":
+            key, altDict, refreshFn, selectFn = (
+                currentVoxKey, voxAlteredJson,
+                self._populateVoxOffsets, self._selectVox)
+        elif self._editorMode == "demo":
+            key, altDict, refreshFn, selectFn = (
+                currentDemoKey, demoAlteredJson,
+                self._populateDemoOffsets, self._selectDemo)
+        elif self._editorMode == "zmovie":
+            key, altDict, refreshFn, selectFn = (
+                currentZmovieKey, zmovieAlteredJson,
+                self._populateZmovieOffsets, self._selectZmovie)
+        else:
+            return
+        if not key or key not in altDict:
+            return
+        if self._appSettings.value("editor/warn_on_revert", True, type=bool):
+            reply = QMessageBox.warning(
+                self, "Revert to Original",
+                f"Revert {key} to its original state?\n\n"
+                "All changes to this entry will be lost.",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+        del altDict[key]
+        self.revertVoxButton.setVisible(False)
+        refreshFn()
+        selectFn(self.ui.offsetListBox.currentIndex())
+        self._clearEditor()
+        self.statusBar().showMessage(f"{key} reverted to original", 3000)
 
     def deleteSubtitle(self):
         """Remove the currently selected subtitle from the XML."""
@@ -2383,22 +2543,29 @@ class MainWindow(QMainWindow):
         self._loadDemoFromPath(demoFile)
         self._switchToDemoMode()
         self.statusBar().showMessage(
-            f"DEMO.DAT loaded: {len(demoDialogueJson)} entries with dialogue", 4000
+            f"DEMO.DAT loaded: {len(demoOriginalJson)} entries with dialogue", 4000
         )
 
     def _loadDemoFromPath(self, demoFile: str):
-        global demoManager, demoOriginalData, demoFilePath, demoDialogueJson, demoSeqToOffset
+        global demoManager, demoOriginalData, demoFilePath
+        global demoOriginalJson, demoAlteredJson, demoOffsetsJson, demoSeqToOffset
         demoOriginalData = open(demoFile, 'rb').read()
         demoFilePath = demoFile
         demoManager = DM.parseDemoFile(demoOriginalData)
         try:
             from DemoTools.extractDemoVox import extractFromFile
-            demoDialogueJson = extractFromFile(demoFile, fileType="demo")
+            demoOriginalJson = extractFromFile(demoFile, fileType="demo")
         except Exception as e:
             print(f"Warning: dialogue extraction failed: {e}")
-            demoDialogueJson = {}
+            demoOriginalJson = {}
+        demoAlteredJson = {}  # fresh load, no edits yet
         sortedOffsets = sorted(demoManager.keys(), key=lambda k: int(k))
         demoSeqToOffset = {f"demo-{i + 1:02}": off for i, off in enumerate(sortedOffsets)}
+        # Build offsets.json for STAGE.DIR adjustment
+        demoOffsetsJson = {}
+        for name, off in demoSeqToOffset.items():
+            num = name.replace("demo-", "")
+            demoOffsetsJson[num] = f"{int(off):08x}"
 
     def loadZmovieData(self):
         zmovieFile = self.openFileDialog("STR Files (*.STR *.str);;All Files (*)", "Load ZMOVIE.STR")
@@ -2408,47 +2575,53 @@ class MainWindow(QMainWindow):
             self._loadZmovieFromPath(zmovieFile)
             self._switchToZmovieMode()
             self.statusBar().showMessage(
-                f"ZMOVIE.STR loaded: {len(zmovieDialogueJson)} entries with subtitles", 4000
+                f"ZMOVIE.STR loaded: {len(zmovieOriginalJson)} entries with subtitles", 4000
             )
         except Exception as e:
             QMessageBox.critical(self, "Load Error", str(e))
 
     def _loadZmovieFromPath(self, zmovieFile: str):
-        global zmovieDialogueJson, zmovieOriginalData, zmovieFilePath
+        global zmovieOriginalJson, zmovieAlteredJson, zmovieOriginalData, zmovieFilePath
         from zmovieTools.extractZmovie import extractFromFile as zmExtract
         zmovieOriginalData = open(zmovieFile, 'rb').read()
         zmovieFilePath = zmovieFile
         try:
-            zmovieDialogueJson = zmExtract(zmovieFile)
+            zmovieOriginalJson = zmExtract(zmovieFile)
         except Exception as e:
             print(f"Warning: ZMovie subtitle extraction failed: {e}")
-            zmovieDialogueJson = {}
+            zmovieOriginalJson = {}
+        zmovieAlteredJson = {}  # fresh load, no edits yet
 
     def exportZmovieJson(self):
-        """Save zmovieDialogueJson to a JSON file."""
-        if not zmovieDialogueJson:
-            QMessageBox.warning(self, "Nothing loaded", "No ZMOVIE.STR is currently loaded.")
+        """Save zmovieAlteredJson (only changed entries) to a JSON file."""
+        if not zmovieAlteredJson:
+            QMessageBox.warning(self, "No changes", "No ZMOVIE entries have been modified.")
             return
         stem = os.path.splitext(os.path.basename(zmovieFilePath))[0].lower() if zmovieFilePath else "zmovie"
         default = os.path.join(os.path.dirname(zmovieFilePath) if zmovieFilePath else "",
                                f"{stem}-dialogue.json")
         filename = QFileDialog.getSaveFileName(
-            self, "Export ZMovie JSON", default, "JSON Files (*.json)"
+            self, "Export ZMovie JSON (altered only)", default, "JSON Files (*.json)"
         )[0]
         if not filename:
             return
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(zmovieDialogueJson, f, ensure_ascii=False, indent=2)
+                json.dump(zmovieAlteredJson, f, ensure_ascii=False, indent=2)
             self._modified = False
-            self.statusBar().showMessage(f"ZMovie JSON exported: {filename}", 5000)
+            self.statusBar().showMessage(
+                f"ZMovie JSON exported ({len(zmovieAlteredJson)} altered entries): {filename}", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
     def compileZmovieFile(self):
-        """Compile zmovieDialogueJson into a new ZMOVIE.STR using extractZmovie.compileToFile."""
+        """Compile zmovieAlteredJson into a new ZMOVIE.STR using extractZmovie.compileToFile.
+        Only altered entries are patched; unchanged entries keep original bytes."""
         if not zmovieOriginalData:
             QMessageBox.warning(self, "Nothing loaded", "No ZMOVIE.STR is currently loaded.")
+            return
+        if not zmovieAlteredJson:
+            QMessageBox.warning(self, "No changes", "No ZMOVIE entries have been modified.")
             return
         filename = QFileDialog.getSaveFileName(
             self, "Compile ZMOVIE.STR", zmovieFilePath or "", "STR Files (*.STR *.str)"
@@ -2457,39 +2630,42 @@ class MainWindow(QMainWindow):
             return
         try:
             from zmovieTools.extractZmovie import compileToFile as zmCompile
-            zmCompile(filename, zmovieOriginalData, zmovieDialogueJson)
+            zmCompile(filename, zmovieOriginalData, zmovieAlteredJson)
             self._modified = False
-            self.statusBar().showMessage(f"ZMOVIE.STR compiled: {filename}", 5000)
+            self.statusBar().showMessage(
+                f"ZMOVIE.STR compiled ({len(zmovieAlteredJson)} entries patched): {filename}", 5000)
         except ValueError as e:
             QMessageBox.critical(self, "Compile Error — Subtitle Too Long", str(e))
         except Exception as e:
             QMessageBox.critical(self, "Compile Error", str(e))
 
     def exportDemoJson(self):
-        """Save demoDialogueJson to a JSON file — the intermediate format for scripts."""
-        import json
-        if not demoDialogueJson:
-            QMessageBox.warning(self, "Nothing loaded", "No DEMO.DAT is currently loaded.")
+        """Save demoAlteredJson (only changed entries) to a JSON file."""
+        if not demoAlteredJson:
+            QMessageBox.warning(self, "No changes", "No DEMO entries have been modified.")
             return
         stem = os.path.splitext(os.path.basename(demoFilePath))[0].lower() if demoFilePath else "demo"
         default = os.path.join(os.path.dirname(demoFilePath) if demoFilePath else "", f"{stem}-dialogue.json")
         filename = QFileDialog.getSaveFileName(
-            self, "Export DEMO JSON", default, "JSON Files (*.json)"
+            self, "Export DEMO JSON (altered only)", default, "JSON Files (*.json)"
         )[0]
         if not filename:
             return
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(demoDialogueJson, f, ensure_ascii=False, indent=2)
+                json.dump(demoAlteredJson, f, ensure_ascii=False, indent=2)
             self._modified = False
-            self.statusBar().showMessage(f"DEMO JSON exported: {filename}", 5000)
+            self.statusBar().showMessage(f"DEMO JSON exported ({len(demoAlteredJson)} altered entries): {filename}", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
     def compileDemoDatFile(self):
-        """Sync JSON edits into demoManager, then patch-in-place and write a new DEMO.DAT."""
+        """Sync only altered DEMO entries into demoManager, then patch-in-place and write a new DEMO.DAT."""
         if not demoManager or not demoOriginalData:
             QMessageBox.warning(self, "Nothing loaded", "No DEMO.DAT is currently loaded.")
+            return
+        if not demoAlteredJson:
+            QMessageBox.warning(self, "No changes", "No DEMO entries have been modified.")
             return
         filename = QFileDialog.getSaveFileName(
             self, "Compile DEMO.DAT", demoFilePath or "", "DAT Files (*.DAT *.dat)"
@@ -2498,9 +2674,16 @@ class MainWindow(QMainWindow):
             return
         try:
             self._syncJsonToDemoManager()
+            alteredOffsets = set()
+            for key in demoAlteredJson:
+                off = demoSeqToOffset.get(key)
+                if off:
+                    alteredOffsets.add(int(off))
             patchedData = bytearray(demoOriginalData)
             sortedOffsets = sorted(int(k) for k in demoManager)
             for i, byteOffset in enumerate(sortedOffsets):
+                if byteOffset not in alteredOffsets:
+                    continue  # skip unmodified — keep original bytes
                 demoObj = demoManager[str(byteOffset)]
                 origLen = (
                     sortedOffsets[i + 1] - byteOffset
@@ -2520,35 +2703,40 @@ class MainWindow(QMainWindow):
             with open(filename, 'wb') as f:
                 f.write(bytes(patchedData))
             self._modified = False
-            self.statusBar().showMessage(f"DEMO.DAT compiled: {filename}", 5000)
+            self.statusBar().showMessage(
+                f"DEMO.DAT compiled ({len(alteredOffsets)} entries patched): {filename}", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Compile Error", str(e))
 
     def exportVoxJson(self):
-        """Save voxDialogueJson to a JSON file."""
-        if not voxDialogueJson:
-            QMessageBox.warning(self, "Nothing loaded", "No VOX.DAT is currently loaded.")
+        """Save voxAlteredJson (only changed entries) to a JSON file."""
+        if not voxAlteredJson:
+            QMessageBox.warning(self, "No changes", "No VOX entries have been modified.")
             return
         stem = os.path.splitext(os.path.basename(voxFilePath))[0].lower() if voxFilePath else "vox"
         default = os.path.join(os.path.dirname(voxFilePath) if voxFilePath else "",
                                f"{stem}-dialogue.json")
         filename = QFileDialog.getSaveFileName(
-            self, "Export VOX JSON", default, "JSON Files (*.json)"
+            self, "Export VOX JSON (altered only)", default, "JSON Files (*.json)"
         )[0]
         if not filename:
             return
         try:
             with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(voxDialogueJson, f, ensure_ascii=False, indent=2)
+                json.dump(voxAlteredJson, f, ensure_ascii=False, indent=2)
             self._modified = False
-            self.statusBar().showMessage(f"VOX JSON exported: {filename}", 5000)
+            self.statusBar().showMessage(f"VOX JSON exported ({len(voxAlteredJson)} altered entries): {filename}", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Export Error", str(e))
 
     def compileVoxDatFile(self):
-        """Sync voxDialogueJson into voxManager, then patch-in-place and write a new VOX.DAT."""
+        """Sync only altered VOX entries into voxManager, then patch-in-place and write a new VOX.DAT.
+        Unchanged entries are left pristine — their original bytes are kept as-is."""
         if not voxManager or not voxOriginalData:
             QMessageBox.warning(self, "Nothing loaded", "No VOX.DAT is currently loaded.")
+            return
+        if not voxAlteredJson:
+            QMessageBox.warning(self, "No changes", "No VOX entries have been modified.")
             return
         filename = QFileDialog.getSaveFileName(
             self, "Compile VOX.DAT", voxFilePath or "", "DAT Files (*.DAT *.dat)"
@@ -2556,10 +2744,19 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         try:
-            self._syncJsonToManager(voxDialogueJson, voxSeqToOffset, voxManager)
+            # Only sync altered entries — unchanged entries stay pristine
+            self._syncJsonToManager(voxAlteredJson, voxSeqToOffset, voxManager)
+            # Build set of altered byte offsets so we only patch those
+            alteredOffsets = set()
+            for key in voxAlteredJson:
+                off = voxSeqToOffset.get(key)
+                if off:
+                    alteredOffsets.add(int(off))
             patchedData = bytearray(voxOriginalData)
             sortedOffsets = sorted(int(k) for k in voxManager)
             for i, byteOffset in enumerate(sortedOffsets):
+                if byteOffset not in alteredOffsets:
+                    continue  # skip unmodified — keep original bytes
                 voxObj = voxManager[str(byteOffset)]
                 origLen = (
                     sortedOffsets[i + 1] - byteOffset
@@ -2579,7 +2776,8 @@ class MainWindow(QMainWindow):
             with open(filename, 'wb') as f:
                 f.write(bytes(patchedData))
             self._modified = False
-            self.statusBar().showMessage(f"VOX.DAT compiled: {filename}", 5000)
+            self.statusBar().showMessage(
+                f"VOX.DAT compiled ({len(alteredOffsets)} entries patched): {filename}", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Compile Error", str(e))
 
@@ -2605,7 +2803,7 @@ class MainWindow(QMainWindow):
                 lines[idx].text          = sub.get("text", "")
 
     def _syncJsonToDemoManager(self):
-        self._syncJsonToManager(demoDialogueJson, demoSeqToOffset, demoManager)
+        self._syncJsonToManager(demoAlteredJson, demoSeqToOffset, demoManager)
 
     def _openFontEditor(self):
         """Open the Font Editor dialog."""
@@ -2733,9 +2931,16 @@ class MainWindow(QMainWindow):
             if dlg.demoEnabled:
                 try:
                     self._syncJsonToDemoManager()
+                    alteredOffsets = set()
+                    for key in demoAlteredJson:
+                        off = demoSeqToOffset.get(key)
+                        if off:
+                            alteredOffsets.add(int(off))
                     patchedData = bytearray(demoOriginalData)
                     sortedOffsets = sorted(int(k) for k in demoManager)
                     for i, byteOffset in enumerate(sortedOffsets):
+                        if byteOffset not in alteredOffsets:
+                            continue  # skip unmodified
                         demoObj = demoManager[str(byteOffset)]
                         origLen = (sortedOffsets[i + 1] - byteOffset
                                    if i + 1 < len(sortedOffsets)
@@ -2762,10 +2967,18 @@ class MainWindow(QMainWindow):
             # ── VOX ──────────────────────────────────────────────────────
             if dlg.voxEnabled:
                 try:
-                    self._syncJsonToManager(voxDialogueJson, voxSeqToOffset, voxManager)
+                    # Only sync altered entries — unchanged entries stay pristine
+                    self._syncJsonToManager(voxAlteredJson, voxSeqToOffset, voxManager)
+                    alteredOffsets = set()
+                    for key in voxAlteredJson:
+                        off = voxSeqToOffset.get(key)
+                        if off:
+                            alteredOffsets.add(int(off))
                     patchedData = bytearray(voxOriginalData)
                     sortedOffsets = sorted(int(k) for k in voxManager)
                     for i, byteOffset in enumerate(sortedOffsets):
+                        if byteOffset not in alteredOffsets:
+                            continue  # skip unmodified
                         voxObj = voxManager[str(byteOffset)]
                         origLen = (sortedOffsets[i + 1] - byteOffset
                                    if i + 1 < len(sortedOffsets)
@@ -2799,7 +3012,7 @@ class MainWindow(QMainWindow):
                         outPath = os.path.join(
                             os.path.dirname(zmovieFilePath) if zmovieFilePath else projectFolder or tmpDir,
                             "ZMOVIE-NEW.STR")
-                    zmCompile(outPath, zmovieOriginalData, zmovieDialogueJson)
+                    zmCompile(outPath, zmovieOriginalData, zmovieAlteredJson)
                     results.append(("ZMOVIE", True, f"ZMOVIE.STR → {outPath}"))
                 except Exception as e:
                     results.append(("ZMOVIE", False, str(e)))
@@ -2849,13 +3062,14 @@ class MainWindow(QMainWindow):
         self._modeTabBar.blockSignals(False)
 
     def _modeData(self) -> tuple:
-        """Return (currentKey, dialogueJson) for the active sequence-based mode."""
+        """Return (currentKey, dialogueJson) for the active sequence-based mode.
+        For demo/vox modes, returns the merged view (altered preferred, original fallback)."""
         if self._editorMode == "demo":
-            return currentDemoKey, demoDialogueJson
+            return currentDemoKey, _mergedDemoJson()
         elif self._editorMode == "vox":
-            return currentVoxKey, voxDialogueJson
+            return currentVoxKey, _mergedVoxJson()
         else:  # zmovie
-            return currentZmovieKey, zmovieDialogueJson
+            return currentZmovieKey, _mergedZmovieJson()
 
     def _hideRadioWidgets(self):
         self.ui.audioCueListView.setVisible(False)
@@ -2869,21 +3083,33 @@ class MainWindow(QMainWindow):
         self.chkUnclaimedVox.setVisible(False)
         self.freqFilterLabel.setVisible(False)
         self.freqFilterCombo.setVisible(False)
+        self.revertVoxButton.setVisible(False)
 
     def _switchToDemoMode(self):
         self._editorMode = "demo"
         self.actionDemoMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
-        self.ui.playVoxButton.setEnabled(bool(demoDialogueJson))
-        self.ui.offsetListBox.clear()
-        for name in sorted(demoDialogueJson.keys()):
-            self.ui.offsetListBox.addItem(name, userData=name)
+        self.ui.playVoxButton.setEnabled(bool(demoOriginalJson) or bool(demoAlteredJson))
+        self._populateDemoOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         if self.ui.offsetListBox.count() > 0:
             self.ui.offsetListBox.setCurrentIndex(0)
             self._selectDemo(0)
+
+    def _populateDemoOffsets(self):
+        """Repopulate the DEMO offset list with bullet markers on altered entries."""
+        merged = _mergedDemoJson()
+        current = self.ui.offsetListBox.currentData()
+        self.ui.offsetListBox.blockSignals(True)
+        self.ui.offsetListBox.clear()
+        for name in sorted(merged.keys()):
+            label = f"\u2022 {name}" if name in demoAlteredJson else name
+            self.ui.offsetListBox.addItem(label, userData=name)
+        self.ui.offsetListBox.blockSignals(False)
+        idx = self.ui.offsetListBox.findData(current)
+        self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _switchToZmovieMode(self):
         self._editorMode = "zmovie"
@@ -2891,22 +3117,34 @@ class MainWindow(QMainWindow):
         self._syncTab()
         self._hideRadioWidgets()
         self.ui.playVoxButton.setEnabled(bool(zmovieOriginalData))
-        self.ui.offsetListBox.clear()
-        for name in sorted(zmovieDialogueJson.keys()):
-            self.ui.offsetListBox.addItem(name, userData=name)
+        self._populateZmovieOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
         if self.ui.offsetListBox.count() > 0:
             self.ui.offsetListBox.setCurrentIndex(0)
             self._selectZmovie(0)
 
+    def _populateZmovieOffsets(self):
+        """Repopulate the ZMOVIE offset list with bullet markers on altered entries."""
+        merged = _mergedZmovieJson()
+        current = self.ui.offsetListBox.currentData()
+        self.ui.offsetListBox.blockSignals(True)
+        self.ui.offsetListBox.clear()
+        for name in sorted(merged.keys()):
+            label = f"\u2022 {name}" if name in zmovieAlteredJson else name
+            self.ui.offsetListBox.addItem(label, userData=name)
+        self.ui.offsetListBox.blockSignals(False)
+        idx = self.ui.offsetListBox.findData(current)
+        self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
+
     def _switchToVoxMode(self):
         self._editorMode = "vox"
         self.actionVoxMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
-        self.ui.playVoxButton.setEnabled(bool(voxDialogueJson))
+        self.ui.playVoxButton.setEnabled(bool(voxOriginalJson) or bool(voxAlteredJson))
         self.chkUnclaimedVox.setVisible(bool(_radioClaimedVoxAddrs))
+        self.revertVoxButton.setVisible(False)
         self._populateVoxOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
@@ -2929,6 +3167,7 @@ class MainWindow(QMainWindow):
         self.ui.playVoxButton.setEnabled(bool(voxManager))
         self.chkUnclaimedVox.setVisible(False)
         self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
+        self.revertVoxButton.setVisible(False)
         self.freqFilterLabel.setVisible(True)
         self.freqFilterCombo.setVisible(True)
         self._refreshFreqFilter()
@@ -3153,15 +3392,30 @@ class MainWindow(QMainWindow):
             if radioManager.radioXMLData is not None:
                 xmlStr = parseString(ET.tostring(radioManager.radioXMLData)).toprettyxml(indent="  ")
                 zf.writestr('radio.xml', xmlStr)
-            if demoDialogueJson:
-                zf.writestr('demo-dialogue.json',
-                            json.dumps(demoDialogueJson, ensure_ascii=False, indent=2))
-            if voxDialogueJson:
-                zf.writestr('vox-dialogue.json',
-                            json.dumps(voxDialogueJson, ensure_ascii=False, indent=2))
-            if zmovieDialogueJson:
-                zf.writestr('zmovie-dialogue.json',
-                            json.dumps(zmovieDialogueJson, ensure_ascii=False, indent=2))
+            if demoOriginalJson:
+                zf.writestr('demo-original.json',
+                            json.dumps(demoOriginalJson, ensure_ascii=False, indent=2))
+            if demoAlteredJson:
+                zf.writestr('demo-altered.json',
+                            json.dumps(demoAlteredJson, ensure_ascii=False, indent=2))
+            if demoOffsetsJson:
+                zf.writestr('demo-offsets.json',
+                            json.dumps(demoOffsetsJson, indent=2))
+            if voxOriginalJson:
+                zf.writestr('vox-original.json',
+                            json.dumps(voxOriginalJson, ensure_ascii=False, indent=2))
+            if voxAlteredJson:
+                zf.writestr('vox-altered.json',
+                            json.dumps(voxAlteredJson, ensure_ascii=False, indent=2))
+            if voxOffsetsJson:
+                zf.writestr('vox-offsets.json',
+                            json.dumps(voxOffsetsJson, indent=2))
+            if zmovieOriginalJson:
+                zf.writestr('zmovie-original.json',
+                            json.dumps(zmovieOriginalJson, ensure_ascii=False, indent=2))
+            if zmovieAlteredJson:
+                zf.writestr('zmovie-altered.json',
+                            json.dumps(zmovieAlteredJson, ensure_ascii=False, indent=2))
             if activeTblRaw:
                 zf.writestr('font.tbl', activeTblRaw)
 
@@ -3169,9 +3423,9 @@ class MainWindow(QMainWindow):
 
     def openProject(self):
         global projectFilePath, projectSettings
-        global demoDialogueJson, demoSeqToOffset
-        global voxDialogueJson, voxSeqToOffset
-        global zmovieDialogueJson
+        global demoOriginalJson, demoAlteredJson, demoOffsetsJson, demoSeqToOffset
+        global voxOriginalJson, voxAlteredJson, voxOffsetsJson, voxSeqToOffset
+        global zmovieOriginalJson, zmovieAlteredJson
         global activeTblMapping, activeTblRaw
 
         filename = QFileDialog.getOpenFileName(
@@ -3185,9 +3439,23 @@ class MainWindow(QMainWindow):
                 names = zf.namelist()
                 settings = json.loads(zf.read('settings.json'))
                 radioXml = zf.read('radio.xml').decode('utf-8') if 'radio.xml' in names else None
-                demoJson    = json.loads(zf.read('demo-dialogue.json'))    if 'demo-dialogue.json'    in names else {}
-                voxJson     = json.loads(zf.read('vox-dialogue.json'))     if 'vox-dialogue.json'     in names else {}
-                zmovieJson  = json.loads(zf.read('zmovie-dialogue.json'))  if 'zmovie-dialogue.json'  in names else {}
+                # New split DEMO format
+                demoOrigJson = json.loads(zf.read('demo-original.json'))  if 'demo-original.json'    in names else {}
+                demoAltJson  = json.loads(zf.read('demo-altered.json'))   if 'demo-altered.json'     in names else {}
+                demoOffJson  = json.loads(zf.read('demo-offsets.json'))   if 'demo-offsets.json'     in names else {}
+                # Backward compat
+                demoLegacyJson = json.loads(zf.read('demo-dialogue.json')) if 'demo-dialogue.json'   in names else {}
+                # New split VOX format
+                voxOrigJson = json.loads(zf.read('vox-original.json'))    if 'vox-original.json'     in names else {}
+                voxAltJson  = json.loads(zf.read('vox-altered.json'))     if 'vox-altered.json'      in names else {}
+                voxOffJson  = json.loads(zf.read('vox-offsets.json'))     if 'vox-offsets.json'      in names else {}
+                # Backward compat: old projects only have vox-dialogue.json
+                voxLegacyJson = json.loads(zf.read('vox-dialogue.json')) if 'vox-dialogue.json'     in names else {}
+                # New split ZMOVIE format
+                zmOrigJson    = json.loads(zf.read('zmovie-original.json')) if 'zmovie-original.json' in names else {}
+                zmAltJson     = json.loads(zf.read('zmovie-altered.json'))  if 'zmovie-altered.json'  in names else {}
+                # Backward compat
+                zmLegacyJson  = json.loads(zf.read('zmovie-dialogue.json')) if 'zmovie-dialogue.json' in names else {}
                 tblRaw      = zf.read('font.tbl').decode('utf-8')          if 'font.tbl'              in names else ""
         except Exception as e:
             QMessageBox.critical(self, "Open Failed", f"Could not read project file:\n{e}")
@@ -3209,14 +3477,33 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Radio Load Error", f"Failed to restore radio XML:\n{e}")
 
         # Restore demo/vox subtitle JSON
-        if demoJson:
-            demoDialogueJson = demoJson
-            demoSeqToOffset  = {k: "" for k in demoJson}  # real offsets filled in by _loadDemoAudioOnly
-        if voxJson:
-            voxDialogueJson = voxJson
-            voxSeqToOffset  = {k: "" for k in voxJson}
-        if zmovieJson:
-            zmovieDialogueJson = zmovieJson
+        if demoOrigJson:
+            demoOriginalJson = demoOrigJson
+            demoAlteredJson  = demoAltJson
+            demoOffsetsJson  = demoOffJson
+            demoSeqToOffset  = {k: "" for k in set(demoOrigJson) | set(demoAltJson)}
+        elif demoLegacyJson:
+            demoOriginalJson = demoLegacyJson
+            demoAlteredJson  = {}
+            demoOffsetsJson  = {}
+            demoSeqToOffset  = {k: "" for k in demoLegacyJson}
+        if voxOrigJson:
+            voxOriginalJson = voxOrigJson
+            voxAlteredJson  = voxAltJson
+            voxOffsetsJson  = voxOffJson
+            voxSeqToOffset  = {k: "" for k in set(voxOrigJson) | set(voxAltJson)}
+        elif voxLegacyJson:
+            # Migration: treat legacy as original, no alterations
+            voxOriginalJson = voxLegacyJson
+            voxAlteredJson  = {}
+            voxOffsetsJson  = {}
+            voxSeqToOffset  = {k: "" for k in voxLegacyJson}
+        if zmOrigJson:
+            zmovieOriginalJson = zmOrigJson
+            zmovieAlteredJson  = zmAltJson
+        elif zmLegacyJson:
+            zmovieOriginalJson = zmLegacyJson
+            zmovieAlteredJson  = {}
 
         # Restore font table overrides
         if tblRaw:
@@ -3272,8 +3559,8 @@ class MainWindow(QMainWindow):
                             QMessageBox.warning(self, f"{label} Load Error", str(e))
 
     def _loadDemoAudioOnly(self, path: str):
-        """Load demoManager for audio playback without overwriting demoDialogueJson."""
-        global demoManager, demoOriginalData, demoFilePath, demoSeqToOffset
+        """Load demoManager for audio playback without overwriting demoOriginalJson/demoAlteredJson."""
+        global demoManager, demoOriginalData, demoFilePath, demoSeqToOffset, demoOffsetsJson
         demoOriginalData = open(path, 'rb').read()
         demoFilePath = path
         demoManager = DM.parseDemoFile(demoOriginalData)
@@ -3282,10 +3569,16 @@ class MainWindow(QMainWindow):
         for k in list(demoSeqToOffset.keys()):
             if k in newSeqMap:
                 demoSeqToOffset[k] = newSeqMap[k]
+        # Build offsets if not already loaded from project
+        if not demoOffsetsJson:
+            demoOffsetsJson = {}
+            for name, off in newSeqMap.items():
+                num = name.replace("demo-", "")
+                demoOffsetsJson[num] = f"{int(off):08x}"
 
     def _loadVoxAudioOnly(self, path: str):
-        """Load voxManager for audio playback without overwriting voxDialogueJson."""
-        global voxManager, voxOriginalData, voxFilePath, voxSeqToOffset
+        """Load voxManager for audio playback without overwriting voxOriginalJson/voxAlteredJson."""
+        global voxManager, voxOriginalData, voxFilePath, voxSeqToOffset, voxOffsetsJson
         voxOriginalData = open(path, 'rb').read()
         voxFilePath = path
         voxManager = DM.parseDemoFile(voxOriginalData)
@@ -3294,6 +3587,12 @@ class MainWindow(QMainWindow):
         for k in list(voxSeqToOffset.keys()):
             if k in newSeqMap:
                 voxSeqToOffset[k] = newSeqMap[k]
+        # Build offsets if not already loaded from project
+        if not voxOffsetsJson:
+            voxOffsetsJson = {}
+            for name, off in newSeqMap.items():
+                num = name.replace("vox-", "")
+                voxOffsetsJson[num] = f"{int(off):08x}"
 
 
 if __name__ == "__main__":
