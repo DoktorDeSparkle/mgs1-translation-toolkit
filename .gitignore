@@ -83,3 +83,7 @@ CMakeLists.txt.user*
 /build*/
 
 RADIO.DAT
+
+# IDE / editor environments
+.qtcreator/
+.venv/
