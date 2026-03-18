@@ -1288,10 +1288,10 @@ class MainWindow(QMainWindow):
         self._modeToolBar.setFloatable(False)
         self._modeTabBar = QTabBar()
         self._modeTabBar.setExpanding(False)
-        self._modeTabBar.addTab("Radio")
-        self._modeTabBar.addTab("Demo")
+        self._modeTabBar.addTab("RADIO")
+        self._modeTabBar.addTab("DEMO")
         self._modeTabBar.addTab("VOX")
-        self._modeTabBar.addTab("ZMovie")
+        self._modeTabBar.addTab("ZMOVIE")
         self._modeToolBar.addWidget(self._modeTabBar)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._modeToolBar)
         self._modeTabBar.currentChanged.connect(self._onTabChanged)
@@ -1425,7 +1425,10 @@ class MainWindow(QMainWindow):
         radioManager.loadRadioXmlFile(filename)
         self._buildRadioVoxIndex()
         self._populateRadioOffsets()
-        self.setWindowTitle(f"Dialogue Editor — {os.path.basename(filename)}")
+        if projectFilePath:
+            self.setWindowTitle(f"Dialogue Editor \u2014 {os.path.basename(projectFilePath)}")
+        else:
+            self.setWindowTitle("Dialogue Editor \u2014 Unsaved Project")
 
     def _buildRadioVoxIndex(self):
         """Scan all RADIO calls and build the disc-2 and claimed-VOX index sets."""
@@ -3348,7 +3351,10 @@ class MainWindow(QMainWindow):
             radioManager.loadRadioXmlFile(xmlPath)
             self._buildRadioVoxIndex()
             self._populateRadioOffsets()
-            self.setWindowTitle(f"Dialogue Editor \u2014 {os.path.basename(radioPath)}")
+            if projectFilePath:
+                self.setWindowTitle(f"Dialogue Editor \u2014 {os.path.basename(projectFilePath)}")
+            else:
+                self.setWindowTitle("Dialogue Editor \u2014 Unsaved Project")
         finally:
             shutil.rmtree(tmpDir, ignore_errors=True)
 
