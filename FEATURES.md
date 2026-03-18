@@ -63,6 +63,10 @@
 
 ## Planned / Wishlist
 
-1. **mkpsxiso integration** — after Finalize Project, optionally run mkpsxiso to produce a test ISO directly from the app, and launch it in DuckStation for immediate playback testing.
+1. **VOX block length sync to RADIO.DAT** — when VOX subtitle edits change the block length of a clip, the corresponding VOX_CUES entries in RADIO.DAT need their block counts updated. The scripts submodule recompiler doesn't handle this yet. Requires changes in `mgs1-scripts` to read altered VOX lengths and patch RADIO.DAT/XML accordingly.
 
-2. **ZMovie audio playback** — play the STR video stream alongside subtitle preview in ZMovie Mode, so timing edits can be verified against the actual FMV cutscene.
+2. **Finalize Project end-to-end testing** — the Finalize Project dialog has not been thoroughly tested with real game data across all four formats (RADIO, DEMO, VOX, ZMOVIE). Needs a full round-trip test: load project → finalize → build ISO → verify in DuckStation.
+
+3. **mkpsxiso integration** — after Finalize Project, optionally run mkpsxiso to produce a test ISO directly from the app, and launch it in DuckStation for immediate playback testing.
+
+4. **ZMovie audio playback** — play the STR video stream alongside subtitle preview in ZMovie Mode, so timing edits can be verified against the actual FMV cutscene.
