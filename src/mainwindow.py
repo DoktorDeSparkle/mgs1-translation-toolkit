@@ -66,6 +66,18 @@ def _mergedZmovieJson() -> dict:
     merged.update(zmovieAlteredJson)
     return merged
 
+def _ensureJsonV2(data: dict) -> dict:
+    """Auto-convert v1 demo/vox JSON to v2 if needed.
+    v1: {"demo-01": [{"01": "text"}, {"01": "timing,duration"}]}
+    v2: {"demo-01": {"startFrame": {"duration": "...", "text": "..."}}}"""
+    if not data:
+        return data
+    first = next(iter(data.values()))
+    if not isinstance(first, list):
+        return data  # already v2
+    from scripts.DemoTools.demoJsonConverter import convertToNew
+    return convertToNew(data)
+
 def _mergedDemoJson() -> dict:
     """Return demoOriginalJson with demoAlteredJson overlaid (altered takes priority)."""
     merged = dict(demoOriginalJson)
@@ -451,6 +463,9 @@ class FinalizeProjectDialog(QDialog):
         self.chkDoubleWidth = QCheckBox("Double-width save blocks (-D)")
         radioLayout.addRow(self.chkDoubleWidth)
 
+        self.chkIntegral = QCheckBox("Integral disc (--integral)")
+        radioLayout.addRow(self.chkIntegral)
+
         self.chkDebug = QCheckBox("Debug output (-v)")
         radioLayout.addRow(self.chkDebug)
 
@@ -479,11 +494,6 @@ class FinalizeProjectDialog(QDialog):
         self.stageGroup.setLayout(stageLayout)
         layout.addWidget(self.stageGroup)
 
-        # Grey out STAGE.DIR unless Radio or Demo is checked
-        self._updateStageEnabled()
-        self.radioGroup.toggled.connect(self._updateStageEnabled)
-        self.demoGroup = None  # forward ref; connected after demoGroup is created
-
         # ── DEMO section ──────────────────────────────────────────────────
         self.demoGroup = QGroupBox("DEMO.DAT")
         self.demoGroup.setCheckable(True)
@@ -492,7 +502,11 @@ class FinalizeProjectDialog(QDialog):
         demoLayout.addWidget(QLabel("Compile JSON edits into DEMO.DAT binary."))
         self.demoGroup.setLayout(demoLayout)
         layout.addWidget(self.demoGroup)
+        # Grey out STAGE.DIR unless Radio or Demo is checked
+        self.radioGroup.toggled.connect(self._updateStageEnabled)
         self.demoGroup.toggled.connect(self._updateStageEnabled)
+        self.stageGroup.toggled.connect(self._warnStageUnchecked)
+        self._updateStageEnabled()
 
         # ── VOX section ───────────────────────────────────────────────────
         self.voxGroup = QGroupBox("VOX.DAT")
@@ -512,9 +526,25 @@ class FinalizeProjectDialog(QDialog):
         self.zmovieGroup.setLayout(zmovieLayout)
         layout.addWidget(self.zmovieGroup)
 
-        # ── Bottom area ───────────────────────────────────────────────────
-        self.chkReplace = QCheckBox("Replace original files")
-        layout.addWidget(self.chkReplace)
+        # ── Output folder ────────────────────────────────────────────────
+        outGroup = QGroupBox("Output")
+        outLayout = QVBoxLayout()
+
+        outDirRow = QHBoxLayout()
+        self.txtOutputDir = QLineEdit()
+        self.txtOutputDir.setPlaceholderText("(leave blank to write alongside originals)")
+        outDirRow.addWidget(self.txtOutputDir)
+        btnBrowseOut = QPushButton("Browse...")
+        btnBrowseOut.clicked.connect(self._browseOutputDir)
+        outDirRow.addWidget(btnBrowseOut)
+        outLayout.addLayout(outDirRow)
+
+        self.chkReplace = QCheckBox("Overwrite files in output folder on each build")
+        self.chkReplace.setChecked(True)
+        outLayout.addWidget(self.chkReplace)
+
+        outGroup.setLayout(outLayout)
+        layout.addWidget(outGroup)
 
         btnRow = QHBoxLayout()
         btnFinalize = QPushButton("Finalize")
@@ -533,6 +563,19 @@ class FinalizeProjectDialog(QDialog):
         radioOn = self.radioGroup.isChecked()
         demoOn = self.demoGroup is not None and self.demoGroup.isChecked()
         self.stageGroup.setEnabled(radioOn or demoOn)
+
+    def _warnStageUnchecked(self, checked):
+        if not checked:
+            QMessageBox.warning(self, "STAGE.DIR Disabled",
+                "Disabling STAGE.DIR modifications will likely break the game "
+                "if any VOX or RADIO offsets have changed.\n\n"
+                "Only uncheck this if you know offsets are unchanged.")
+
+    def _browseOutputDir(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Output Folder", self.txtOutputDir.text())
+        if path:
+            self.txtOutputDir.setText(path)
 
     def _browseStageDir(self):
         path = QFileDialog.getOpenFileName(
@@ -562,11 +605,15 @@ class FinalizeProjectDialog(QDialog):
     @property
     def debugOutput(self): return self.chkDebug.isChecked()
     @property
+    def integral(self): return self.chkIntegral.isChecked()
+    @property
     def stageDirPath(self): return self.txtStageDir.text().strip()
     @property
     def stageOutName(self): return self.txtStageOut.text().strip()
     @property
     def replaceOriginals(self): return self.chkReplace.isChecked()
+    @property
+    def outputDir(self): return self.txtOutputDir.text().strip()
 
 
 class FontEditorDialog(QDialog):
@@ -1219,6 +1266,7 @@ class MainWindow(QMainWindow):
 
         self.actionSaveProjectAs = QAction("Save Project As...", self)
         self.actionSaveProjectAs.setStatusTip("Save the current project to a new .mtp file")
+        self.actionSaveProjectAs.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_S))
         self.actionSaveProjectAs.triggered.connect(self.saveProjectAs)
 
         self.actionFinalizeProject = QAction("Finalize Project...", self)
@@ -1820,6 +1868,8 @@ class MainWindow(QMainWindow):
         else:
             # Populate text editor
             subs = radioManager.getSubs()
+            if idx >= len(subs):
+                return
             text = subs[idx].replace("\\r\\n", "\n")
             self.ui.DialogueEditorBox.setText(text)
 
@@ -2900,102 +2950,41 @@ class MainWindow(QMainWindow):
                 "\n".join(missing))
             return
 
-        # ── Confirm overwrite ────────────────────────────────────────────
-        if dlg.replaceOriginals:
+        # ── Output folder setup ──────────────────────────────────────────
+        outDir = dlg.outputDir
+        if outDir:
+            os.makedirs(outDir, exist_ok=True)
+        elif dlg.replaceOriginals:
             ans = QMessageBox.warning(self, "Replace Original Files",
-                "This will overwrite the original files. "
+                "No output folder set — this will overwrite the original files. "
                 "This cannot be undone. Continue?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if ans != QMessageBox.Yes:
                 return
 
+        def _outPath(origPath: str, defaultName: str) -> str:
+            """Determine output path: custom folder with original name, or alongside original."""
+            if outDir:
+                return os.path.join(outDir, os.path.basename(origPath) if origPath else defaultName)
+            elif dlg.replaceOriginals and origPath:
+                return origPath
+            elif origPath:
+                return os.path.join(os.path.dirname(origPath), defaultName)
+            else:
+                return os.path.join(projectFolder or tmpDir, defaultName)
+
         results = []   # list of (label, success, detail)
         tmpDir = tempfile.mkdtemp(prefix="mgs-finalize-")
+        stagePath = (dlg.stageDirPath or None) if dlg.stageEnabled else None
 
         try:
-            # ── RADIO ────────────────────────────────────────────────────
-            if dlg.radioEnabled:
-                try:
-                    import scripts.RadioDatRecompiler as RDR
-                    # Reset module globals
-                    RDR.stageBytes = b''
-                    RDR.debug = False
-                    RDR.subUseOriginalHex = False
-                    RDR.useDWidSaveB = False
-                    RDR.newOffsets = {}
+            # ══════════════════════════════════════════════════════════════
+            # Order matters! VOX must compile first so its new offsets can
+            # be patched into STAGE.DIR and RADIO XML before RADIO compiles.
+            # Build script order: VOX → VOX offsets → DEMO → RADIO → ZMOVIE
+            # ══════════════════════════════════════════════════════════════
 
-                    tmpXmlPath = os.path.join(tmpDir, "radio-finalize.xml")
-                    radioManager.saveXML(tmpXmlPath)
-
-                    radioDatPath = projectSettings.get("radio_dat_path", "")
-                    if dlg.replaceOriginals and radioDatPath:
-                        radioOut = radioDatPath
-                    elif radioDatPath:
-                        radioOut = os.path.join(os.path.dirname(radioDatPath), "RADIO-NEW.DAT")
-                    else:
-                        radioOut = os.path.join(projectFolder or tmpDir, "RADIO-NEW.DAT")
-
-                    stagePath = (dlg.stageDirPath or None) if dlg.stageEnabled else None
-                    if dlg.replaceOriginals and stagePath:
-                        stageOut = dlg.stageOutName or stagePath
-                    elif stagePath:
-                        stageOut = dlg.stageOutName or os.path.join(
-                            os.path.dirname(stagePath), "STAGE-NEW.DIR")
-                    else:
-                        stageOut = None
-
-                    args = Namespace(
-                        input=tmpXmlPath, output=radioOut,
-                        stage=stagePath, stageOut=stageOut,
-                        prepare=dlg.prepare, hex=dlg.useOrigHex,
-                        debug=dlg.debugOutput, double=dlg.doubleWidth,
-                    )
-                    RDR.main(args)
-                    detail = f"RADIO.DAT → {radioOut}"
-                    if stagePath:
-                        detail += f"\nSTAGE.DIR → {stageOut}"
-                    results.append(("RADIO", True, detail))
-                except Exception as e:
-                    results.append(("RADIO", False, str(e)))
-
-            # ── DEMO ─────────────────────────────────────────────────────
-            if dlg.demoEnabled:
-                try:
-                    self._syncJsonToDemoManager()
-                    alteredOffsets = set()
-                    for key in demoAlteredJson:
-                        off = demoSeqToOffset.get(key)
-                        if off:
-                            alteredOffsets.add(int(off))
-                    patchedData = bytearray(demoOriginalData)
-                    sortedOffsets = sorted(int(k) for k in demoManager)
-                    for i, byteOffset in enumerate(sortedOffsets):
-                        if byteOffset not in alteredOffsets:
-                            continue  # skip unmodified
-                        demoObj = demoManager[str(byteOffset)]
-                        origLen = (sortedOffsets[i + 1] - byteOffset
-                                   if i + 1 < len(sortedOffsets)
-                                   else len(demoOriginalData) - byteOffset)
-                        origSlice = bytes(demoOriginalData[byteOffset:byteOffset + origLen])
-                        newSlice = demoObj.getModifiedBytes(origSlice)
-                        if len(newSlice) != origLen:
-                            raise ValueError(
-                                f"Demo at offset {byteOffset} changed size "
-                                f"({origLen} → {len(newSlice)})")
-                        patchedData[byteOffset:byteOffset + origLen] = newSlice
-                    if dlg.replaceOriginals and demoFilePath:
-                        outPath = demoFilePath
-                    else:
-                        outPath = os.path.join(
-                            os.path.dirname(demoFilePath) if demoFilePath else projectFolder or tmpDir,
-                            "DEMO-NEW.DAT")
-                    with open(outPath, 'wb') as f:
-                        f.write(bytes(patchedData))
-                    results.append(("DEMO", True, f"DEMO.DAT → {outPath}"))
-                except Exception as e:
-                    results.append(("DEMO", False, str(e)))
-
-            # ── VOX ──────────────────────────────────────────────────────
+            # ── 1. VOX compile ───────────────────────────────────────────
             if dlg.voxEnabled:
                 try:
                     # Only sync altered entries — unchanged entries stay pristine
@@ -3021,28 +3010,130 @@ class MainWindow(QMainWindow):
                                 f"VOX at offset {byteOffset} changed size "
                                 f"({origLen} → {len(newSlice)})")
                         patchedData[byteOffset:byteOffset + origLen] = newSlice
-                    if dlg.replaceOriginals and voxFilePath:
-                        outPath = voxFilePath
-                    else:
-                        outPath = os.path.join(
-                            os.path.dirname(voxFilePath) if voxFilePath else projectFolder or tmpDir,
-                            "VOX-NEW.DAT")
+                    outPath = _outPath(voxFilePath, "VOX-NEW.DAT")
                     with open(outPath, 'wb') as f:
                         f.write(bytes(patchedData))
                     results.append(("VOX", True, f"VOX.DAT → {outPath}"))
                 except Exception as e:
                     results.append(("VOX", False, str(e)))
 
-            # ── ZMOVIE ───────────────────────────────────────────────────
+            # ── 2. VOX offset adjust (STAGE.DIR + RADIO XML) ────────────
+            #    Compute new offsets from the compiled VOX.DAT and patch
+            #    STAGE.DIR Pv tags + RADIO XML voxCode attributes.
+            if dlg.voxEnabled and voxOffsetsJson:
+                try:
+                    from scripts.StageDirTools.voxOffsetAdjuster import (
+                        buildBlockMap, adjustVoxOffsets, adjustRadioXml)
+                    # Compute new offsets from the compiled voxManager
+                    newVoxOffsets = {}
+                    newSorted = sorted(voxManager.keys(), key=lambda k: int(k))
+                    for i, off in enumerate(newSorted):
+                        num = f"{i + 1:04}"
+                        newVoxOffsets[num] = f"{int(off):08x}"
+                    blockMap = buildBlockMap(voxOffsetsJson, newVoxOffsets)
+                    changedBlocks = sum(1 for k, v in blockMap.items() if k != v)
+
+                    voxAdjDetail = []
+                    if changedBlocks > 0 and stagePath:
+                        stageData = bytearray(open(stagePath, 'rb').read())
+                        stageReps = adjustVoxOffsets(stageData, blockMap)
+                        # Write patched STAGE.DIR
+                        stageOutPath = _outPath(stagePath, "STAGE-NEW.DIR")
+                        with open(stageOutPath, 'wb') as f:
+                            f.write(stageData)
+                        voxAdjDetail.append(
+                            f"STAGE.DIR: {stageReps} Pv refs patched → {stageOutPath}")
+
+                    if changedBlocks > 0 and dlg.radioEnabled and radioManager.radioXMLData is not None:
+                        # Save XML to temp, patch it, reload
+                        tmpXmlForVox = os.path.join(tmpDir, "radio-voxadj.xml")
+                        radioManager.saveXML(tmpXmlForVox)
+                        radioReps = adjustRadioXml(tmpXmlForVox, blockMap)
+                        # Reload patched XML so RADIO compile uses updated voxCodes
+                        radioManager.loadRadioXmlFile(tmpXmlForVox)
+                        voxAdjDetail.append(
+                            f"RADIO XML: {radioReps} voxCode refs patched")
+
+                    if changedBlocks == 0:
+                        voxAdjDetail.append("No VOX offsets changed — nothing to adjust")
+                    results.append(("VOX Offsets", True, "; ".join(voxAdjDetail)))
+                except Exception as e:
+                    results.append(("VOX Offsets", False, str(e)))
+
+            # ── 3. DEMO compile ──────────────────────────────────────────
+            if dlg.demoEnabled:
+                try:
+                    self._syncJsonToDemoManager()
+                    alteredOffsets = set()
+                    for key in demoAlteredJson:
+                        off = demoSeqToOffset.get(key)
+                        if off:
+                            alteredOffsets.add(int(off))
+                    patchedData = bytearray(demoOriginalData)
+                    sortedOffsets = sorted(int(k) for k in demoManager)
+                    for i, byteOffset in enumerate(sortedOffsets):
+                        if byteOffset not in alteredOffsets:
+                            continue  # skip unmodified
+                        demoObj = demoManager[str(byteOffset)]
+                        origLen = (sortedOffsets[i + 1] - byteOffset
+                                   if i + 1 < len(sortedOffsets)
+                                   else len(demoOriginalData) - byteOffset)
+                        origSlice = bytes(demoOriginalData[byteOffset:byteOffset + origLen])
+                        newSlice = demoObj.getModifiedBytes(origSlice)
+                        if len(newSlice) != origLen:
+                            raise ValueError(
+                                f"Demo at offset {byteOffset} changed size "
+                                f"({origLen} → {len(newSlice)})")
+                        patchedData[byteOffset:byteOffset + origLen] = newSlice
+                    outPath = _outPath(demoFilePath, "DEMO-NEW.DAT")
+                    with open(outPath, 'wb') as f:
+                        f.write(bytes(patchedData))
+                    results.append(("DEMO", True, f"DEMO.DAT → {outPath}"))
+                except Exception as e:
+                    results.append(("DEMO", False, str(e)))
+
+            # ── 4. RADIO compile (uses patched XML from step 2) ──────────
+            if dlg.radioEnabled:
+                try:
+                    import scripts.RadioDatRecompiler as RDR
+                    # Reset module globals
+                    RDR.stageBytes = b''
+                    RDR.debug = False
+                    RDR.subUseOriginalHex = False
+                    RDR.useDWidSaveB = False
+                    RDR.newOffsets = {}
+
+                    tmpXmlPath = os.path.join(tmpDir, "radio-finalize.xml")
+                    radioManager.saveXML(tmpXmlPath)
+
+                    radioDatPath = projectSettings.get("radio_dat_path", "")
+                    radioOut = _outPath(radioDatPath, "RADIO-NEW.DAT")
+
+                    if stagePath:
+                        stageOut = dlg.stageOutName or _outPath(stagePath, "STAGE-NEW.DIR")
+                    else:
+                        stageOut = None
+
+                    args = Namespace(
+                        input=tmpXmlPath, output=radioOut,
+                        stage=stagePath, stageOut=stageOut,
+                        prepare=dlg.prepare, hex=dlg.useOrigHex,
+                        debug=dlg.debugOutput, double=dlg.doubleWidth,
+                        integral=dlg.integral,
+                    )
+                    RDR.main(args)
+                    detail = f"RADIO.DAT → {radioOut}"
+                    if stagePath:
+                        detail += f"\nSTAGE.DIR → {stageOut}"
+                    results.append(("RADIO", True, detail))
+                except Exception as e:
+                    results.append(("RADIO", False, str(e)))
+
+            # ── 5. ZMOVIE compile ────────────────────────────────────────
             if dlg.zmovieEnabled:
                 try:
                     from zmovieTools.extractZmovie import compileToFile as zmCompile
-                    if dlg.replaceOriginals and zmovieFilePath:
-                        outPath = zmovieFilePath
-                    else:
-                        outPath = os.path.join(
-                            os.path.dirname(zmovieFilePath) if zmovieFilePath else projectFolder or tmpDir,
-                            "ZMOVIE-NEW.STR")
+                    outPath = _outPath(zmovieFilePath, "ZMOVIE-NEW.STR")
                     zmCompile(outPath, zmovieOriginalData, zmovieAlteredJson)
                     results.append(("ZMOVIE", True, f"ZMOVIE.STR → {outPath}"))
                 except Exception as e:
@@ -3510,28 +3601,27 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.warning(self, "Radio Load Error", f"Failed to restore radio XML:\n{e}")
 
-        # Restore demo/vox subtitle JSON
+        # Restore demo/vox subtitle JSON (auto-convert v1 → v2 if needed)
         if demoOrigJson:
-            demoOriginalJson = demoOrigJson
-            demoAlteredJson  = demoAltJson
+            demoOriginalJson = _ensureJsonV2(demoOrigJson)
+            demoAlteredJson  = _ensureJsonV2(demoAltJson)
             demoOffsetsJson  = demoOffJson
-            demoSeqToOffset  = {k: "" for k in set(demoOrigJson) | set(demoAltJson)}
+            demoSeqToOffset  = {k: "" for k in set(demoOriginalJson) | set(demoAlteredJson)}
         elif demoLegacyJson:
-            demoOriginalJson = demoLegacyJson
+            demoOriginalJson = _ensureJsonV2(demoLegacyJson)
             demoAlteredJson  = {}
             demoOffsetsJson  = {}
-            demoSeqToOffset  = {k: "" for k in demoLegacyJson}
+            demoSeqToOffset  = {k: "" for k in demoOriginalJson}
         if voxOrigJson:
-            voxOriginalJson = voxOrigJson
-            voxAlteredJson  = voxAltJson
+            voxOriginalJson = _ensureJsonV2(voxOrigJson)
+            voxAlteredJson  = _ensureJsonV2(voxAltJson)
             voxOffsetsJson  = voxOffJson
-            voxSeqToOffset  = {k: "" for k in set(voxOrigJson) | set(voxAltJson)}
+            voxSeqToOffset  = {k: "" for k in set(voxOriginalJson) | set(voxAlteredJson)}
         elif voxLegacyJson:
-            # Migration: treat legacy as original, no alterations
-            voxOriginalJson = voxLegacyJson
+            voxOriginalJson = _ensureJsonV2(voxLegacyJson)
             voxAlteredJson  = {}
             voxOffsetsJson  = {}
-            voxSeqToOffset  = {k: "" for k in voxLegacyJson}
+            voxSeqToOffset  = {k: "" for k in voxOriginalJson}
         if zmOrigJson:
             zmovieOriginalJson = zmOrigJson
             zmovieAlteredJson  = zmAltJson
