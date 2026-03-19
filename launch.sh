@@ -68,4 +68,4 @@ fi
 
 # ── Activate and launch ─────────────────────────────────────────────────────
 source .venv/bin/activate
-exec python mainwindow.py "$@"
+exec python src/mainwindow.py "$@"

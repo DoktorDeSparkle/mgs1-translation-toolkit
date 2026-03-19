@@ -13,9 +13,11 @@ from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from ui_form import Ui_MainWindow
 
-# For submodules, add submodule to sys.path
-submodule_path = os.path.join(os.path.dirname(__file__), "scripts")
-sys.path.insert(0, submodule_path)
+# For submodules, add project root to sys.path (scripts/ lives one level up from src/)
+_project_root = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir))
+sys.path.insert(0, _project_root)
+# Also add scripts/ itself for internal imports (e.g. from DemoTools.extractDemoVox)
+sys.path.insert(0, os.path.join(_project_root, "scripts"))
 
 # MGS Script modules
 from scripts.radioModule import radioDataEditor as RDE
@@ -3678,6 +3680,11 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    # Set app icon (used by macOS dock/task switcher)
+    iconPath = os.path.join(os.path.dirname(__file__), "icon.png")
+    if os.path.exists(iconPath):
+        from PySide6.QtGui import QIcon
+        app.setWindowIcon(QIcon(iconPath))
     widget = MainWindow()
     widget.show()
     sys.exit(app.exec())

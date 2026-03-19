@@ -62,4 +62,4 @@ if not exist ".venv" (
 
 REM ── Activate and launch ────────────────────────────────────────────────────
 call .venv\Scripts\activate.bat
-python mainwindow.py %*
+python src\mainwindow.py %*
