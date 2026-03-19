@@ -1124,15 +1124,8 @@ class MainWindow(QMainWindow):
         # Editor mode: "radio" or "demo"
         self._editorMode = "radio"
 
-        # ── File Menu ────────────────────────────────────────────────────────
-        self.ui.actionLoad_RADIO_DAT.triggered.connect(self.loadRadioDatFile)
-        self.ui.actionLoad_RADIO_DAT.setStatusTip("Load a RADIO.DAT file")
-        self.ui.actionLoad_Radio_XML.triggered.connect(self.loadRadioXMLFile)
-        self.ui.actionLoad_Radio_XML.setStatusTip("Load a RADIO.XML file")
-        self.ui.actionLoad_VOX_DAT.triggered.connect(self.loadVoxData)
-        self.ui.menuFile.removeAction(self.ui.actionSave_RADIO_DAT)
-        self.ui.actionSave_RADIO_XML.triggered.connect(self.saveRadioXMLFile)
-        self.ui.actionSave_RADIO_XML.setStatusTip("Save current edits to RADIO.XML")
+        # ── File Menu (clear and rebuild) ────────────────────────────────────
+        self.ui.menuFile.clear()
 
         # ── Edit Menu ────────────────────────────────────────────────────────
         self._appSettings = QSettings("MGS-Undubbed", "DialogueEditor")
@@ -1207,89 +1200,47 @@ class MainWindow(QMainWindow):
 
         # (nav buttons are now beside the offset list widget above)
 
-        # ── Project actions (top of File menu) ───────────────────────────────
+        # ── Build File menu from scratch ──────────────────────────────────────
         self.actionOpenFolder = QAction("Open Folder...", self)
-        self.actionOpenFolder.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, and VOX.DAT from a folder")
+        self.actionOpenFolder.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, VOX.DAT, ZMOVIE.STR from a folder")
+        self.actionOpenFolder.setShortcut("Ctrl+O")
         self.actionOpenFolder.triggered.connect(self.openFolder)
-        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionOpenFolder)
 
         self.actionOpenProject = QAction("Open Project (.mtp)...", self)
         self.actionOpenProject.setStatusTip("Open a saved MTP project file")
+        self.actionOpenProject.setShortcut("Ctrl+P")
         self.actionOpenProject.triggered.connect(self.openProject)
-        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionOpenProject)
 
         self.actionSaveProject = QAction("Save Project", self)
         self.actionSaveProject.setStatusTip("Save the current project to its .mtp file")
+        self.actionSaveProject.setShortcut("Ctrl+S")
         self.actionSaveProject.setEnabled(False)
         self.actionSaveProject.triggered.connect(self.saveProject)
-        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionSaveProject)
 
         self.actionSaveProjectAs = QAction("Save Project As...", self)
         self.actionSaveProjectAs.setStatusTip("Save the current project to a new .mtp file")
         self.actionSaveProjectAs.triggered.connect(self.saveProjectAs)
-        self.ui.menuFile.insertAction(self.ui.actionLoad_RADIO_DAT, self.actionSaveProjectAs)
-
-        self.ui.menuFile.insertSeparator(self.ui.actionLoad_RADIO_DAT)
-
-        # ── Keyboard shortcuts ────────────────────────────────────────────────
-        # Override defaults from the .ui file to match project-centric workflow
-        self.ui.actionLoad_RADIO_DAT.setShortcut("")       # was Ctrl+O
-        self.ui.playVoxButton.setShortcut("")               # was Ctrl+P
-        self.actionOpenFolder.setShortcut("Ctrl+O")
-        self.actionOpenProject.setShortcut("Ctrl+P")
-        self.actionSaveProject.setShortcut("Ctrl+S")
-        self.ui.playVoxButton.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Space))
-
-        # ── Add Save/Load VOX and DEMO actions (not in generated form) ────────
-        self.actionSave_VOX_DAT = QAction("Save VOX.DAT", self)
-        self.actionSave_VOX_DAT.setStatusTip("Write timing edits back to VOX.DAT")
-        self.actionSave_VOX_DAT.triggered.connect(self.saveVoxDatFile)
-        self.ui.menuFile.insertAction(self.ui.actionSave_RADIO_XML, self.actionSave_VOX_DAT)
-
-        self.actionLoad_DEMO_DAT = QAction("Load DEMO.DAT...", self)
-        self.actionLoad_DEMO_DAT.setStatusTip("Load a DEMO.DAT file for demo editing")
-        self.actionLoad_DEMO_DAT.triggered.connect(self.loadDemoData)
-        self.ui.menuFile.insertAction(self.ui.actionLoad_VOX_DAT, self.actionLoad_DEMO_DAT)
-
-        self.actionExport_DEMO_JSON = QAction("Export DEMO JSON...", self)
-        self.actionExport_DEMO_JSON.setStatusTip("Save subtitle edits to a JSON file")
-        self.actionExport_DEMO_JSON.triggered.connect(self.exportDemoJson)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_DEMO_JSON)
-
-        self.actionExport_VOX_JSON = QAction("Export VOX JSON...", self)
-        self.actionExport_VOX_JSON.setStatusTip("Save VOX subtitle edits to a JSON file")
-        self.actionExport_VOX_JSON.triggered.connect(self.exportVoxJson)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_VOX_JSON)
-
-        self.actionLoad_ZMOVIE = QAction("Load ZMOVIE.STR...", self)
-        self.actionLoad_ZMOVIE.setStatusTip("Load a ZMOVIE.STR file for subtitle editing")
-        self.actionLoad_ZMOVIE.triggered.connect(self.loadZmovieData)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionLoad_ZMOVIE)
-
-        self.actionExport_ZMOVIE_JSON = QAction("Export ZMovie JSON...", self)
-        self.actionExport_ZMOVIE_JSON.setStatusTip("Save ZMovie subtitle edits to a JSON file")
-        self.actionExport_ZMOVIE_JSON.triggered.connect(self.exportZmovieJson)
-        self.ui.menuFile.insertAction(self.actionSave_VOX_DAT, self.actionExport_ZMOVIE_JSON)
-
-        # ── Bottom of File menu: Open shortcuts, Finalize, then Quit ─────
-        self.ui.menuFile.insertSeparator(self.ui.actionQuit)
-
-        actionOpenFolderBottom = QAction("Open Folder...", self)
-        actionOpenFolderBottom.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, and VOX.DAT from a folder")
-        actionOpenFolderBottom.triggered.connect(self.openFolder)
-        self.ui.menuFile.insertAction(self.ui.actionQuit, actionOpenFolderBottom)
-
-        actionOpenProjectBottom = QAction("Open Project (.mtp)...", self)
-        actionOpenProjectBottom.setStatusTip("Open a saved MTP project file")
-        actionOpenProjectBottom.triggered.connect(self.openProject)
-        self.ui.menuFile.insertAction(self.ui.actionQuit, actionOpenProjectBottom)
 
         self.actionFinalizeProject = QAction("Finalize Project...", self)
         self.actionFinalizeProject.setStatusTip("Batch-compile all game data files")
         self.actionFinalizeProject.triggered.connect(self.finalizeProject)
-        self.ui.menuFile.insertAction(self.ui.actionQuit, self.actionFinalizeProject)
 
-        self.ui.menuFile.insertSeparator(self.ui.actionQuit)
+        actionQuit = QAction("Quit", self)
+        actionQuit.setShortcut("Ctrl+Q")
+        actionQuit.triggered.connect(self.close)
+
+        self.ui.menuFile.addAction(self.actionOpenFolder)
+        self.ui.menuFile.addAction(self.actionOpenProject)
+        self.ui.menuFile.addSeparator()
+        self.ui.menuFile.addAction(self.actionSaveProject)
+        self.ui.menuFile.addAction(self.actionSaveProjectAs)
+        self.ui.menuFile.addSeparator()
+        self.ui.menuFile.addAction(self.actionFinalizeProject)
+        self.ui.menuFile.addSeparator()
+        self.ui.menuFile.addAction(actionQuit)
+
+        # ── Keyboard shortcuts ────────────────────────────────────────────────
+        self.ui.playVoxButton.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Space))
 
         # ── Bottom-right GUI buttons (above Quit) ────────────────────────────
         from PySide6.QtWidgets import QFrame
