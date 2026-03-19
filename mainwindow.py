@@ -268,6 +268,44 @@ class ZmovieConversionThread(QThread):
             self.errorOccurred.emit(str(e))
 
 
+from PySide6.QtWidgets import QListWidget as _QListWidget
+
+class OffsetListWidget(_QListWidget):
+    """QListWidget with QComboBox-compatible API for drop-in replacement."""
+    currentIndexChanged = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._userData = []  # parallel list of userData per row
+        self.currentRowChanged.connect(self.currentIndexChanged)
+
+    def addItem(self, text, userData=None):
+        super().addItem(text)
+        self._userData.append(userData)
+
+    def clear(self):
+        super().clear()
+        self._userData.clear()
+
+    def currentData(self):
+        idx = self.currentRow()
+        if 0 <= idx < len(self._userData):
+            return self._userData[idx]
+        return None
+
+    def findData(self, data):
+        try:
+            return self._userData.index(data)
+        except ValueError:
+            return -1
+
+    def currentIndex(self):
+        return self.currentRow()
+
+    def setCurrentIndex(self, idx):
+        self.setCurrentRow(idx)
+
+
 class XmlFileDialog(QFileDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -354,6 +392,11 @@ class PreferencesDialog(QDialog):
             settings.value("editor/warn_on_revert", True, type=bool))
         editorLayout.addWidget(self.chkRevertWarn)
 
+        self.chkShowIndexNumbers = QCheckBox("Show index numbers in lists")
+        self.chkShowIndexNumbers.setChecked(
+            settings.value("editor/show_index_numbers", True, type=bool))
+        editorLayout.addWidget(self.chkShowIndexNumbers)
+
         editorGroup.setLayout(editorLayout)
         layout.addWidget(editorGroup)
 
@@ -377,6 +420,8 @@ class PreferencesDialog(QDialog):
                                 self.comboSourceLang.currentData())
         self._settings.setValue("editor/warn_on_revert",
                                 self.chkRevertWarn.isChecked())
+        self._settings.setValue("editor/show_index_numbers",
+                                self.chkShowIndexNumbers.isChecked())
         super().accept()
 
 
@@ -1068,6 +1113,12 @@ class MainWindow(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
+        # App icon
+        iconPath = os.path.join(os.path.dirname(__file__), "icon.png")
+        if os.path.exists(iconPath):
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(iconPath))
+
         # Editor mode: "radio" or "demo"
         self._editorMode = "radio"
 
@@ -1084,6 +1135,44 @@ class MainWindow(QMainWindow):
         # ── Edit Menu ────────────────────────────────────────────────────────
         self._appSettings = QSettings("MGS-Undubbed", "DialogueEditor")
         self.ui.actionPreferences.triggered.connect(self._openPreferences)
+
+        # ── Replace offset combo box with persistent list widget ─────────────
+        oldCombo = self.ui.offsetListBox
+        parentLayout = oldCombo.parentWidget().layout()
+        comboIdx = parentLayout.indexOf(oldCombo)
+        oldCombo.setVisible(False)
+
+        offsetRow = QHBoxLayout()
+        self.ui.offsetListBox = OffsetListWidget(self)
+        self.ui.offsetListBox.setMaximumHeight(160)  # ~8 rows
+        self.ui.offsetListBox.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        offsetRow.addWidget(self.ui.offsetListBox, stretch=1)
+
+        # Right side: freq filter, prev, next — stacked, vertically centered
+        rightCol = QVBoxLayout()
+        rightCol.addStretch()
+        freqRow = QHBoxLayout()
+        self.freqFilterLabel = QLabel("Freq:")
+        self.freqFilterLabel.setVisible(True)
+        self.freqFilterCombo = QComboBox()
+        self.freqFilterCombo.setVisible(True)
+        freqRow.addWidget(self.freqFilterLabel)
+        freqRow.addWidget(self.freqFilterCombo)
+        rightCol.addLayout(freqRow)
+        self.btnPrevEntry = QPushButton("▲ Prev")
+        self.btnPrevEntry.setToolTip("Previous entry (Cmd+Up)")
+        self.btnPrevEntry.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Up))
+        self.btnPrevEntry.clicked.connect(lambda: self._navigateEntry(-1))
+        self.btnNextEntry = QPushButton("▼ Next")
+        self.btnNextEntry.setToolTip("Next entry (Cmd+Down)")
+        self.btnNextEntry.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Down))
+        self.btnNextEntry.clicked.connect(lambda: self._navigateEntry(1))
+        rightCol.addWidget(self.btnPrevEntry)
+        rightCol.addWidget(self.btnNextEntry)
+        rightCol.addStretch()
+        offsetRow.addLayout(rightCol, stretch=1)
+
+        parentLayout.insertLayout(comboIdx + 1, offsetRow)
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
@@ -1111,30 +1200,10 @@ class MainWindow(QMainWindow):
         self.chkUnclaimedVox.toggled.connect(self._populateVoxOffsets)
         self.ui.verticalLayout.insertWidget(labelIdx + 3, self.chkUnclaimedVox)
 
-        # ── Frequency filter (radio mode only) ───────────────────────────────
-        freqFilterRow = QHBoxLayout()
-        self.freqFilterLabel = QLabel("Freq:")
-        self.freqFilterLabel.setVisible(False)
-        self.freqFilterCombo = QComboBox()
-        self.freqFilterCombo.setVisible(False)
+        # (frequency filter is now in the nav column beside the offset list)
         self.freqFilterCombo.currentIndexChanged.connect(self._populateRadioOffsets)
-        freqFilterRow.addWidget(self.freqFilterLabel)
-        freqFilterRow.addWidget(self.freqFilterCombo)
-        self.ui.verticalLayout.insertLayout(labelIdx + 4, freqFilterRow)
 
-        # ── Entry navigation buttons (▲ / ▼ below offset list) ───────────────
-        entryNavRow = QHBoxLayout()
-        self.btnPrevEntry = QPushButton("▲ Prev")
-        self.btnPrevEntry.setToolTip("Previous entry (Cmd+Up)")
-        self.btnPrevEntry.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Up))
-        self.btnPrevEntry.clicked.connect(lambda: self._navigateEntry(-1))
-        self.btnNextEntry = QPushButton("▼ Next")
-        self.btnNextEntry.setToolTip("Next entry (Cmd+Down)")
-        self.btnNextEntry.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Down))
-        self.btnNextEntry.clicked.connect(lambda: self._navigateEntry(1))
-        entryNavRow.addWidget(self.btnPrevEntry)
-        entryNavRow.addWidget(self.btnNextEntry)
-        self.ui.verticalLayout.insertLayout(labelIdx + 5, entryNavRow)
+        # (nav buttons are now beside the offset list widget above)
 
         # ── Project actions (top of File menu) ───────────────────────────────
         self.actionOpenFolder = QAction("Open Folder...", self)
@@ -1663,8 +1732,8 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setText("")
 
         self.ui.audioCueListView.clear()
-        for audio in radioManager.getVoxOffsets():
-            QListWidgetItem(audio, self.ui.audioCueListView)
+        for i, audio in enumerate(radioManager.getVoxOffsets()):
+            QListWidgetItem(f"{self._idxPrefix(i)}{audio}", self.ui.audioCueListView)
 
         self._clearEditor()
 
@@ -1674,9 +1743,9 @@ class MainWindow(QMainWindow):
         else:
             # No VOX_CUES (e.g. staff calls): load SUBTITLE elements directly from the call
             self.ui.subsPreviewList.clear()
-            for sub in radioManager.workingCall.findall("SUBTITLE"):
+            for i, sub in enumerate(radioManager.workingCall.findall("SUBTITLE")):
                 text = sub.get("text", "")
-                QListWidgetItem(text, self.ui.subsPreviewList)
+                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -1693,10 +1762,10 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         # Prefer altered, fall back to original
         subtitles = demoAlteredJson.get(key, demoOriginalJson.get(key, {}))
-        for startFrame in sorted(subtitles.keys(), key=int):
+        for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            QListWidgetItem(text, self.ui.subsPreviewList)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         # Enable revert button only if this entry has been altered
         self.revertVoxButton.setVisible(self._editorMode == "demo" and key in demoAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
@@ -1715,10 +1784,10 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         # Prefer altered, fall back to original
         subtitles = zmovieAlteredJson.get(key, zmovieOriginalJson.get(key, {}))
-        for startFrame in sorted(subtitles.keys(), key=int):
+        for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            QListWidgetItem(text, self.ui.subsPreviewList)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         self.revertVoxButton.setVisible(self._editorMode == "zmovie" and key in zmovieAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
@@ -1736,10 +1805,10 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         # Prefer altered, fall back to original
         subtitles = voxAlteredJson.get(key, voxOriginalJson.get(key, {}))
-        for startFrame in sorted(subtitles.keys(), key=int):
+        for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            QListWidgetItem(text, self.ui.subsPreviewList)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         # Enable revert button only if this entry has been altered
         self.revertVoxButton.setVisible(self._editorMode == "vox" and key in voxAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
@@ -1749,7 +1818,7 @@ class MainWindow(QMainWindow):
         global currentSubIndex, currentVoxOffset
         if item is None:
             return
-        offset = self.ui.audioCueListView.currentItem().text()
+        offset = self.ui.audioCueListView.currentItem().text().split("  ", 1)[-1]
         radioManager.setWorkingVox(offset)
         currentSubIndex = -1
 
@@ -1763,8 +1832,8 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setText("0x" + voxOffsetHex)
 
         self.ui.subsPreviewList.clear()
-        for text in radioManager.getSubs():
-            QListWidgetItem(text, self.ui.subsPreviewList)
+        for i, text in enumerate(radioManager.getSubs()):
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
 
         self._clearEditor()
         if self.ui.subsPreviewList.count() > 0:
@@ -2190,13 +2259,19 @@ class MainWindow(QMainWindow):
         if self._editorMode in ("demo", "vox", "zmovie"):
             key, djson = self._modeData()
             subtitles = djson.get(key, {})
-            for startFrame in sorted(subtitles.keys(), key=int):
+            for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
                 sub = subtitles[startFrame]
                 text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-                QListWidgetItem(text, self.ui.subsPreviewList)
+                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         else:
-            for text in radioManager.getSubs():
-                QListWidgetItem(text, self.ui.subsPreviewList)
+            for i, text in enumerate(radioManager.getSubs()):
+                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+
+    def _idxPrefix(self, i: int) -> str:
+        """Return a zero-padded index prefix if the setting is enabled, else empty string."""
+        if self._appSettings.value("editor/show_index_numbers", True, type=bool):
+            return f"{i:02d}  "
+        return ""
 
     def _clearEditor(self):
         """Reset the editor panel."""

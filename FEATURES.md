@@ -70,3 +70,7 @@
 3. **mkpsxiso integration** — after Finalize Project, optionally run mkpsxiso to produce a test ISO directly from the app, and launch it in DuckStation for immediate playback testing.
 
 4. **ZMovie audio playback** — play the STR video stream alongside subtitle preview in ZMovie Mode, so timing edits can be verified against the actual FMV cutscene.
+
+## Known Bugs
+
+1. **[scripts] Unknown chunk type crashes DEMO/VOX loading on Integral disc** — `demoClasses.py` line 637: `root.append("unknownChunk", {...})` passes two arguments to `ET.Element.append()` which only takes one. The Integral disc contains chunk types not seen in the original release, hitting the `case _:` fallback. Fix: wrap in `ET.Element()` — `root.append(ET.Element("unknownChunk", {...}))`. A local fix has been applied but needs to be committed to the `mgs1-scripts` submodule.
