@@ -414,6 +414,24 @@ class PreferencesDialog(QDialog):
         editorGroup.setLayout(editorLayout)
         layout.addWidget(editorGroup)
 
+        # ── Build section ────────────────────────────────────────────────
+        buildGroup = QGroupBox("Build")
+        buildLayout = QVBoxLayout()
+
+        outDirRow = QHBoxLayout()
+        outDirRow.addWidget(QLabel("Default output folder:"))
+        self.txtDefaultOutDir = QLineEdit(
+            settings.value("build/output_dir", ""))
+        self.txtDefaultOutDir.setPlaceholderText("(none — writes alongside originals)")
+        outDirRow.addWidget(self.txtDefaultOutDir)
+        btnBrowseOutDir = QPushButton("Browse...")
+        btnBrowseOutDir.clicked.connect(self._browseDefaultOutDir)
+        outDirRow.addWidget(btnBrowseOutDir)
+        buildLayout.addLayout(outDirRow)
+
+        buildGroup.setLayout(buildLayout)
+        layout.addWidget(buildGroup)
+
         # ── Buttons ───────────────────────────────────────────────────────
         btnRow = QHBoxLayout()
         btnOk = QPushButton("OK")
@@ -436,12 +454,75 @@ class PreferencesDialog(QDialog):
                                 self.chkRevertWarn.isChecked())
         self._settings.setValue("editor/show_index_numbers",
                                 self.chkShowIndexNumbers.isChecked())
+        self._settings.setValue("build/output_dir",
+                                self.txtDefaultOutDir.text().strip())
         super().accept()
+
+    def _browseDefaultOutDir(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Select Default Output Folder", self.txtDefaultOutDir.text())
+        if path:
+            self.txtDefaultOutDir.setText(path)
+
+
+class _LogCapture:
+    """Redirect stdout/stderr to a callback while preserving original output."""
+    def __init__(self, callback, original):
+        self._callback = callback
+        self._original = original
+    def write(self, text):
+        if text.strip():
+            self._callback(text.rstrip())
+        self._original.write(text)
+    def flush(self):
+        self._original.flush()
+
+
+class FinalizeProgressDialog(QDialog):
+    """Modal progress dialog shown during Finalize Project.
+    Captures stdout/stderr and displays build output in real time."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Finalizing Project...")
+        self.setMinimumSize(520, 360)
+        self.setModal(True)
+        layout = QVBoxLayout()
+
+        self.statusLabel = QLabel("Starting...")
+        self.statusLabel.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self.statusLabel)
+
+        from PySide6.QtWidgets import QPlainTextEdit
+        self.logBox = QPlainTextEdit()
+        self.logBox.setReadOnly(True)
+        self.logBox.setFont(QFont("Menlo, Courier New, Courier, monospace", 11))
+        layout.addWidget(self.logBox)
+
+        self.btnClose = QPushButton("Close")
+        self.btnClose.setEnabled(False)
+        self.btnClose.clicked.connect(self.accept)
+        layout.addWidget(self.btnClose)
+
+        self.setLayout(layout)
+
+    def setStep(self, label: str):
+        self.statusLabel.setText(label)
+        QApplication.processEvents()
+
+    def log(self, text: str):
+        self.logBox.appendPlainText(text)
+        QApplication.processEvents()
+
+    def finish(self, summary: str, hasErrors: bool):
+        self.statusLabel.setText("Complete (with errors)" if hasErrors else "Complete!")
+        self.log("\n" + summary)
+        self.btnClose.setEnabled(True)
 
 
 class FinalizeProjectDialog(QDialog):
     """Dialog for batch-compiling all (or selected) game data files."""
-    def __init__(self, stageDirPath="", parent=None):
+    def __init__(self, stageDirPath="", defaultOutputDir="", parent=None):
         super().__init__(parent)
         self.setWindowTitle("Finalize Project")
         self.setMinimumWidth(480)
@@ -487,9 +568,21 @@ class FinalizeProjectDialog(QDialog):
         stageDirRow.addWidget(self.btnBrowseStage)
         stageLayout.addRow("STAGE.DIR path:", stageDirRow)
 
+        self.chkStageReplace = QCheckBox("Replace original STAGE.DIR")
+        self.chkStageReplace.setChecked(True)
+        self.chkStageReplace.toggled.connect(self._updateStageOutEnabled)
+        stageLayout.addRow(self.chkStageReplace)
+
+        stageOutRow = QHBoxLayout()
         self.txtStageOut = QLineEdit()
-        self.txtStageOut.setPlaceholderText("Output name for STAGE.DIR (optional, -S)")
-        stageLayout.addRow("STAGE.DIR output:", self.txtStageOut)
+        self.txtStageOut.setPlaceholderText("Output path for STAGE.DIR")
+        self.txtStageOut.setEnabled(False)
+        stageOutRow.addWidget(self.txtStageOut)
+        self.btnBrowseStageOut = QPushButton("Browse...")
+        self.btnBrowseStageOut.setEnabled(False)
+        self.btnBrowseStageOut.clicked.connect(self._browseStageOut)
+        stageOutRow.addWidget(self.btnBrowseStageOut)
+        stageLayout.addRow("Output path:", stageOutRow)
 
         self.stageGroup.setLayout(stageLayout)
         layout.addWidget(self.stageGroup)
@@ -531,7 +624,7 @@ class FinalizeProjectDialog(QDialog):
         outLayout = QVBoxLayout()
 
         outDirRow = QHBoxLayout()
-        self.txtOutputDir = QLineEdit()
+        self.txtOutputDir = QLineEdit(defaultOutputDir)
         self.txtOutputDir.setPlaceholderText("(leave blank to write alongside originals)")
         outDirRow.addWidget(self.txtOutputDir)
         btnBrowseOut = QPushButton("Browse...")
@@ -570,6 +663,27 @@ class FinalizeProjectDialog(QDialog):
                 "Disabling STAGE.DIR modifications will likely break the game "
                 "if any VOX or RADIO offsets have changed.\n\n"
                 "Only uncheck this if you know offsets are unchanged.")
+
+    def _updateStageOutEnabled(self, checked):
+        self.txtStageOut.setEnabled(not checked)
+        self.btnBrowseStageOut.setEnabled(not checked)
+        if not checked and not self.txtStageOut.text().strip():
+            # Auto-populate from output folder or alongside original
+            outDir = self.txtOutputDir.text().strip() if hasattr(self, 'txtOutputDir') else ""
+            stageName = os.path.basename(self.txtStageDir.text().strip()) or "STAGE.DIR"
+            if outDir:
+                self.txtStageOut.setText(os.path.join(outDir, stageName))
+            elif self.txtStageDir.text().strip():
+                self.txtStageOut.setText(os.path.join(
+                    os.path.dirname(self.txtStageDir.text().strip()), "STAGE-NEW.DIR"))
+
+    def _browseStageOut(self):
+        path = QFileDialog.getSaveFileName(
+            self, "Save STAGE.DIR As", self.txtStageOut.text() or self.txtStageDir.text(),
+            "DIR Files (*.DIR *.dir);;All Files (*)"
+        )[0]
+        if path:
+            self.txtStageOut.setText(path)
 
     def _browseOutputDir(self):
         path = QFileDialog.getExistingDirectory(
@@ -2926,7 +3040,9 @@ class MainWindow(QMainWindow):
                     break
 
         # ── Show dialog ──────────────────────────────────────────────────
-        dlg = FinalizeProjectDialog(stageDirPath=stageDirAutoPath, parent=self)
+        defaultOutDir = self._appSettings.value("build/output_dir", "")
+        dlg = FinalizeProjectDialog(stageDirPath=stageDirAutoPath,
+                                    defaultOutputDir=defaultOutDir, parent=self)
         if dlg.exec() != QDialog.Accepted:
             return
 
@@ -2976,6 +3092,16 @@ class MainWindow(QMainWindow):
         results = []   # list of (label, success, detail)
         tmpDir = tempfile.mkdtemp(prefix="mgs-finalize-")
         stagePath = (dlg.stageDirPath or None) if dlg.stageEnabled else None
+        # Working STAGE.DIR path — starts as original, updated if VOX offsets patch it
+        stageWorkingPath = stagePath
+
+        # ── Show progress dialog and capture stdout ───────────────────
+        progress = FinalizeProgressDialog(parent=self)
+        progress.show()
+        QApplication.processEvents()
+        _oldStdout, _oldStderr = sys.stdout, sys.stderr
+        sys.stdout = _LogCapture(progress.log, _oldStdout)
+        sys.stderr = _LogCapture(progress.log, _oldStderr)
 
         try:
             # ══════════════════════════════════════════════════════════════
@@ -2986,33 +3112,37 @@ class MainWindow(QMainWindow):
 
             # ── 1. VOX compile ───────────────────────────────────────────
             if dlg.voxEnabled:
+                progress.setStep("Compiling VOX.DAT...")
                 try:
-                    # Only sync altered entries — unchanged entries stay pristine
                     self._syncJsonToManager(voxAlteredJson, voxSeqToOffset, voxManager)
                     alteredOffsets = set()
                     for key in voxAlteredJson:
                         off = voxSeqToOffset.get(key)
                         if off:
                             alteredOffsets.add(int(off))
-                    patchedData = bytearray(voxOriginalData)
+                    # Rebuild entry by entry, padding each to 0x800 alignment
+                    # Track new offsets for the offset adjuster
+                    output = bytearray()
+                    _newVoxEntryOffsets = []  # [(entryIndex, newByteOffset), ...]
                     sortedOffsets = sorted(int(k) for k in voxManager)
                     for i, byteOffset in enumerate(sortedOffsets):
-                        if byteOffset not in alteredOffsets:
-                            continue  # skip unmodified
-                        voxObj = voxManager[str(byteOffset)]
+                        _newVoxEntryOffsets.append((i, len(output)))
                         origLen = (sortedOffsets[i + 1] - byteOffset
                                    if i + 1 < len(sortedOffsets)
                                    else len(voxOriginalData) - byteOffset)
                         origSlice = bytes(voxOriginalData[byteOffset:byteOffset + origLen])
-                        newSlice = voxObj.getModifiedBytes(origSlice)
-                        if len(newSlice) != origLen:
-                            raise ValueError(
-                                f"VOX at offset {byteOffset} changed size "
-                                f"({origLen} → {len(newSlice)})")
-                        patchedData[byteOffset:byteOffset + origLen] = newSlice
+                        if byteOffset in alteredOffsets:
+                            entry = voxManager[str(byteOffset)].getModifiedBytes(origSlice)
+                        else:
+                            entry = origSlice
+                        output.extend(entry)
+                        # Pad to 0x800 boundary
+                        remainder = len(entry) % 0x800
+                        if remainder != 0:
+                            output.extend(b'\x00' * (0x800 - remainder))
                     outPath = _outPath(voxFilePath, "VOX-NEW.DAT")
                     with open(outPath, 'wb') as f:
-                        f.write(bytes(patchedData))
+                        f.write(bytes(output))
                     results.append(("VOX", True, f"VOX.DAT → {outPath}"))
                 except Exception as e:
                     results.append(("VOX", False, str(e)))
@@ -3021,15 +3151,15 @@ class MainWindow(QMainWindow):
             #    Compute new offsets from the compiled VOX.DAT and patch
             #    STAGE.DIR Pv tags + RADIO XML voxCode attributes.
             if dlg.voxEnabled and voxOffsetsJson:
+                progress.setStep("Adjusting VOX offsets in STAGE.DIR + RADIO XML...")
                 try:
                     from scripts.StageDirTools.voxOffsetAdjuster import (
                         buildBlockMap, adjustVoxOffsets, adjustRadioXml)
-                    # Compute new offsets from the compiled voxManager
+                    # Compute new offsets from the rebuilt VOX.DAT
                     newVoxOffsets = {}
-                    newSorted = sorted(voxManager.keys(), key=lambda k: int(k))
-                    for i, off in enumerate(newSorted):
+                    for i, newOff in _newVoxEntryOffsets:
                         num = f"{i + 1:04}"
-                        newVoxOffsets[num] = f"{int(off):08x}"
+                        newVoxOffsets[num] = f"{newOff:08x}"
                     blockMap = buildBlockMap(voxOffsetsJson, newVoxOffsets)
                     changedBlocks = sum(1 for k, v in blockMap.items() if k != v)
 
@@ -3037,12 +3167,13 @@ class MainWindow(QMainWindow):
                     if changedBlocks > 0 and stagePath:
                         stageData = bytearray(open(stagePath, 'rb').read())
                         stageReps = adjustVoxOffsets(stageData, blockMap)
-                        # Write patched STAGE.DIR
-                        stageOutPath = _outPath(stagePath, "STAGE-NEW.DIR")
-                        with open(stageOutPath, 'wb') as f:
+                        # Write to temp so RADIO compile can chain from it
+                        stageTmp = os.path.join(tmpDir, "STAGE-voxadj.DIR")
+                        with open(stageTmp, 'wb') as f:
                             f.write(stageData)
+                        stageWorkingPath = stageTmp
                         voxAdjDetail.append(
-                            f"STAGE.DIR: {stageReps} Pv refs patched → {stageOutPath}")
+                            f"STAGE.DIR: {stageReps} Pv refs patched")
 
                     if changedBlocks > 0 and dlg.radioEnabled and radioManager.radioXMLData is not None:
                         # Save XML to temp, patch it, reload
@@ -3062,6 +3193,7 @@ class MainWindow(QMainWindow):
 
             # ── 3. DEMO compile ──────────────────────────────────────────
             if dlg.demoEnabled:
+                progress.setStep("Compiling DEMO.DAT...")
                 try:
                     self._syncJsonToDemoManager()
                     alteredOffsets = set()
@@ -3069,31 +3201,83 @@ class MainWindow(QMainWindow):
                         off = demoSeqToOffset.get(key)
                         if off:
                             alteredOffsets.add(int(off))
-                    patchedData = bytearray(demoOriginalData)
+                    # Rebuild entry by entry, padding each to 0x800 alignment
+                    output = bytearray()
+                    _newDemoEntryOffsets = []  # [(entryIndex, newByteOffset), ...]
                     sortedOffsets = sorted(int(k) for k in demoManager)
                     for i, byteOffset in enumerate(sortedOffsets):
-                        if byteOffset not in alteredOffsets:
-                            continue  # skip unmodified
-                        demoObj = demoManager[str(byteOffset)]
+                        _newDemoEntryOffsets.append((i, len(output)))
                         origLen = (sortedOffsets[i + 1] - byteOffset
                                    if i + 1 < len(sortedOffsets)
                                    else len(demoOriginalData) - byteOffset)
                         origSlice = bytes(demoOriginalData[byteOffset:byteOffset + origLen])
-                        newSlice = demoObj.getModifiedBytes(origSlice)
-                        if len(newSlice) != origLen:
-                            raise ValueError(
-                                f"Demo at offset {byteOffset} changed size "
-                                f"({origLen} → {len(newSlice)})")
-                        patchedData[byteOffset:byteOffset + origLen] = newSlice
+                        if byteOffset in alteredOffsets:
+                            entry = demoManager[str(byteOffset)].getModifiedBytes(origSlice)
+                        else:
+                            entry = origSlice
+                        output.extend(entry)
+                        # Pad to 0x800 boundary
+                        remainder = len(entry) % 0x800
+                        if remainder != 0:
+                            output.extend(b'\x00' * (0x800 - remainder))
                     outPath = _outPath(demoFilePath, "DEMO-NEW.DAT")
                     with open(outPath, 'wb') as f:
-                        f.write(bytes(patchedData))
+                        f.write(bytes(output))
                     results.append(("DEMO", True, f"DEMO.DAT → {outPath}"))
                 except Exception as e:
                     results.append(("DEMO", False, str(e)))
 
-            # ── 4. RADIO compile (uses patched XML from step 2) ──────────
+            # ── 3b. DEMO offset adjust (STAGE.DIR) ──────────────────────
+            #    Same pattern as VOX: compute new offsets, patch Ps/Pp tags
+            if dlg.demoEnabled and demoOffsetsJson and stageWorkingPath:
+                progress.setStep("Adjusting DEMO offsets in STAGE.DIR...")
+                try:
+                    import struct as _struct
+                    # Compute new demo offsets from rebuilt DEMO.DAT
+                    newDemoOffsets = {}
+                    for i, newOff in _newDemoEntryOffsets:
+                        num = f"{i + 1:02}"
+                        newDemoOffsets[num] = f"{newOff:08x}"
+                    # Build {old_hex_offset: new_hex_offset} map
+                    offsetsToChange = {}
+                    for key in demoOffsetsJson:
+                        if key in newDemoOffsets:
+                            offsetsToChange[demoOffsetsJson[key]] = newDemoOffsets[key]
+                    changedDemo = sum(1 for k, v in offsetsToChange.items() if k != v)
+
+                    if changedDemo > 0:
+                        stageData = bytearray(open(stageWorkingPath, 'rb').read())
+                        patternA = bytes.fromhex("5073060a")
+                        patternB = bytes.fromhex("50700408")
+                        offset = 0
+                        reps = 0
+                        while offset < len(stageData):
+                            if (stageData[offset:offset + 4] == patternA and
+                                    stageData[offset + 8:offset + 12] == patternB):
+                                foundHex = stageData[offset + 4:offset + 8].hex()
+                                if foundHex in offsetsToChange:
+                                    stageData[offset + 4:offset + 8] = bytes.fromhex(
+                                        offsetsToChange[foundHex])
+                                    reps += 1
+                                offset += 12
+                            else:
+                                offset += 1
+                        stageTmp = os.path.join(tmpDir, "STAGE-demoadj.DIR")
+                        with open(stageTmp, 'wb') as f:
+                            f.write(stageData)
+                        stageWorkingPath = stageTmp
+                        results.append(("DEMO Offsets", True,
+                            f"STAGE.DIR: {reps} demo refs patched"))
+                    else:
+                        results.append(("DEMO Offsets", True,
+                            "No DEMO offsets changed — nothing to adjust"))
+                except Exception as e:
+                    results.append(("DEMO Offsets", False, str(e)))
+
+            # ── 4. RADIO compile (uses patched XML from step 2,
+            #       and stageWorkingPath which may have VOX/DEMO offset patches)
             if dlg.radioEnabled:
+                progress.setStep("Compiling RADIO.DAT...")
                 try:
                     import scripts.RadioDatRecompiler as RDR
                     # Reset module globals
@@ -3109,21 +3293,27 @@ class MainWindow(QMainWindow):
                     radioDatPath = projectSettings.get("radio_dat_path", "")
                     radioOut = _outPath(radioDatPath, "RADIO-NEW.DAT")
 
-                    if stagePath:
-                        stageOut = dlg.stageOutName or _outPath(stagePath, "STAGE-NEW.DIR")
+                    # STAGE.DIR: RDR reads from stageWorkingPath (may be VOX/DEMO-patched temp)
+                    # and writes its own radio offset patches to the final output
+                    if stageWorkingPath:
+                        if dlg.chkStageReplace.isChecked():
+                            stageOut = _outPath(stagePath, os.path.basename(stagePath))
+                        else:
+                            stageOut = dlg.stageOutName or _outPath(stagePath, "STAGE-NEW.DIR")
                     else:
                         stageOut = None
 
                     args = Namespace(
                         input=tmpXmlPath, output=radioOut,
-                        stage=stagePath, stageOut=stageOut,
+                        stage=stageWorkingPath, stageOut=stageOut,
                         prepare=dlg.prepare, hex=dlg.useOrigHex,
                         debug=dlg.debugOutput, double=dlg.doubleWidth,
                         integral=dlg.integral,
+                        long=True, pad=False, roundtrip=False,
                     )
                     RDR.main(args)
                     detail = f"RADIO.DAT → {radioOut}"
-                    if stagePath:
+                    if stageOut:
                         detail += f"\nSTAGE.DIR → {stageOut}"
                     results.append(("RADIO", True, detail))
                 except Exception as e:
@@ -3131,6 +3321,7 @@ class MainWindow(QMainWindow):
 
             # ── 5. ZMOVIE compile ────────────────────────────────────────
             if dlg.zmovieEnabled:
+                progress.setStep("Compiling ZMOVIE.STR...")
                 try:
                     from zmovieTools.extractZmovie import compileToFile as zmCompile
                     outPath = _outPath(zmovieFilePath, "ZMOVIE-NEW.STR")
@@ -3141,6 +3332,8 @@ class MainWindow(QMainWindow):
 
         finally:
             shutil.rmtree(tmpDir, ignore_errors=True)
+            sys.stdout = _oldStdout
+            sys.stderr = _oldStderr
 
         # ── Summary ──────────────────────────────────────────────────────
         lines = []
@@ -3148,10 +3341,9 @@ class MainWindow(QMainWindow):
             status = "OK" if ok else "FAILED"
             lines.append(f"[{status}] {label}: {detail}")
         summary = "\n\n".join(lines)
-        if all(ok for _, ok, _ in results):
-            QMessageBox.information(self, "Finalize Complete", summary)
-        else:
-            QMessageBox.warning(self, "Finalize Complete (with errors)", summary)
+        hasErrors = not all(ok for _, ok, _ in results)
+        progress.finish(summary, hasErrors)
+        progress.exec()  # block until user clicks Close
 
     def _onModeChanged(self, action: QAction):
         if action == self.actionDemoMode:
