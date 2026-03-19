@@ -3655,8 +3655,9 @@ class MainWindow(QMainWindow):
         """Load audio managers from DAT paths stored in project settings.
         Prompts the user to relocate a DAT if its stored path no longer exists."""
         dats = [
-            ("DEMO.DAT", "demo_dat_path", self._loadDemoAudioOnly),
-            ("VOX.DAT",  "vox_dat_path",  self._loadVoxAudioOnly),
+            ("DEMO.DAT",    "demo_dat_path",    self._loadDemoAudioOnly),
+            ("VOX.DAT",     "vox_dat_path",     self._loadVoxAudioOnly),
+            ("ZMOVIE.STR",  "zmovie_str_path",  self._loadZmovieDataOnly),
         ]
         for label, key, loader in dats:
             stored = settings.get(key, "")
@@ -3674,7 +3675,8 @@ class MainWindow(QMainWindow):
                     QMessageBox.Yes | QMessageBox.No
                 )
                 if reply == QMessageBox.Yes:
-                    found = self.openFileDialog("DAT Files (*.DAT *.dat)", f"Locate {label}")
+                    fileFilter = "STR Files (*.STR *.str)" if "STR" in label else "DAT Files (*.DAT *.dat)"
+                    found = self.openFileDialog(fileFilter, f"Locate {label}")
                     if found:
                         try:
                             loader(found)
@@ -3717,6 +3719,12 @@ class MainWindow(QMainWindow):
             for name, off in newSeqMap.items():
                 num = name.replace("vox-", "")
                 voxOffsetsJson[num] = f"{int(off):08x}"
+
+    def _loadZmovieDataOnly(self, path: str):
+        """Load zmovieOriginalData for compile without overwriting zmovieOriginalJson/zmovieAlteredJson."""
+        global zmovieOriginalData, zmovieFilePath
+        zmovieOriginalData = open(path, 'rb').read()
+        zmovieFilePath = path
 
 
 if __name__ == "__main__":
