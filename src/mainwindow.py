@@ -3623,10 +3623,10 @@ class MainWindow(QMainWindow):
             voxOffsetsJson  = {}
             voxSeqToOffset  = {k: "" for k in voxOriginalJson}
         if zmOrigJson:
-            zmovieOriginalJson = zmOrigJson
-            zmovieAlteredJson  = zmAltJson
+            zmovieOriginalJson = _ensureJsonV2(zmOrigJson)
+            zmovieAlteredJson  = _ensureJsonV2(zmAltJson)
         elif zmLegacyJson:
-            zmovieOriginalJson = zmLegacyJson
+            zmovieOriginalJson = _ensureJsonV2(zmLegacyJson)
             zmovieAlteredJson  = {}
 
         # Restore font table overrides
