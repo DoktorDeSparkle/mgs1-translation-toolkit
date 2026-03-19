@@ -86,4 +86,10 @@ Built with [PySide6](https://doc.qt.io/qtforpython-6/) and the [mgs1-scripts](ht
 
 Big thanks to Green_goblin, Iseeeva, TEAM_FOXDIE for their reversing efforts, and many others. 
 
-Also, most of this is vibe coded by Claude because I really couldn't be bothered to make a GUI, but folks will be more comfortable here than with command line. 
+Also, most of this is vibe coded by Claude because I really couldn't be bothered to make a GUI, but folks will be more comfortable here than with command line.
+
+## License
+
+This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.html). See [LICENSE](LICENSE) for the full text.
+
+This toolkit was built with significant help from the open reverse-engineering and fan translation community. It is intended to be free for all communities to freely translate and enjoy Metal Gear Solid 1 in any language. We believe preservation and accessibility of classic games is a shared effort, and this work should remain open and available to everyone.
