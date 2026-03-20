@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
-    QFrame, QComboBox)
+    QFrame, QComboBox, QSizePolicy)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
 from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
