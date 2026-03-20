@@ -5,9 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
-    QFrame, QComboBox, QTableWidget, QTableWidgetItem, QAbstractItemView,
-    QHeaderView, QSizePolicy, QGraphicsPixmapItem, QStackedWidget)
-from PySide6.QtGui import QPixmap
+    QFrame, QComboBox)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
 from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -213,34 +211,13 @@ class FfplayThread(QThread):
         if proc is not None and proc.poll() is None:
             proc.kill()
 
-    def pauseSubprocess(self):
-        import os, signal
-        proc = self._proc
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            os.kill(proc.pid, signal.SIGSTOP)
-        except Exception as e:
-            print(f"[pause] SIGSTOP failed: {e}")
-
-    def resumeSubprocess(self):
-        import os, signal
-        proc = self._proc
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            os.kill(proc.pid, signal.SIGCONT)
-        except Exception as e:
-            print(f"[resume] SIGCONT failed: {e}")
-
     def run(self):
         import subprocess
         try:
             cmd = ['ffplay', '-nodisp', '-autoexit', self.wavPath]
             self._proc = subprocess.Popen(cmd,
                                           stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL,
-                                          start_new_session=True)
+                                          stderr=subprocess.DEVNULL)
             ret = self._proc.wait()
             self._proc = None
             if self.isInterruptionRequested():
@@ -343,336 +320,6 @@ class OffsetListWidget(_QListWidget):
         self.setCurrentRow(idx)
 
 
-
-class SubtitleTableWidget(QTableWidget):
-    """Drop-in replacement for subsPreviewList.
-    Displays subtitles as an Excel-style table with alternating row colours.
-
-    Columns:
-      0 – #          (index, fixed narrow)
-      1 – Original   (read-only original text)
-      2 – Edited    (current / edited text)
-      3 – ✓          (bullet marker for modified entries, narrow)
-
-    Compatible with the QListWidget API subset used by MainWindow:
-      clear(), count(), currentRow(), setCurrentRow(),
-      currentItemChanged signal (emulated via currentCellChanged).
-    """
-
-    COL_IDX   = 0
-    COL_ORIG  = 1
-    COL_EDIT  = 2
-    COL_MARK  = 3
-
-    # Row background colours
-    COLOR_ODD  = QColor(255, 255, 255)   # white
-    COLOR_EVEN = QColor(240, 242, 245)   # light blue-grey
-    COLOR_SEL  = QColor(204, 229, 255)   # selection highlight
-
-    # currentItemChanged(current, previous) — emulated
-    currentItemChanged = Signal(object, object)
-
-    def __init__(self, parent=None):
-        super().__init__(0, 4, parent)
-        self._origTexts: list[str] = []   # parallel list of original strings
-
-        # ── Header ───────────────────────────────────────────────────────
-        self.setHorizontalHeaderLabels(["#", "Original", "Edited", "✓"])
-        hdr = self.horizontalHeader()
-        hdr.setSectionResizeMode(self.COL_IDX,  QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(self.COL_ORIG,  QHeaderView.Stretch)
-        hdr.setSectionResizeMode(self.COL_EDIT,  QHeaderView.Stretch)
-        hdr.setSectionResizeMode(self.COL_MARK,  QHeaderView.ResizeToContents)
-        hdr.setHighlightSections(False)
-        hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        # ── Row header ───────────────────────────────────────────────────
-        self.verticalHeader().setVisible(False)
-
-        # ── Behaviour ────────────────────────────────────────────────────
-        self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.setAlternatingRowColors(False)   # we paint manually for full control
-        self.setShowGrid(True)
-        self.setGridStyle(Qt.SolidLine)
-        self.setWordWrap(True)
-
-        # Stylesheet: grid lines, header style, selection colour
-        self.setStyleSheet("""
-            QTableWidget {
-                gridline-color: #c8c8c8;
-                border: 1px solid #b0b0b0;
-                font-size: 12px;
-            }
-            QTableWidget::item {
-                padding: 3px 6px;
-                border: none;
-            }
-            QTableWidget::item:selected {
-                background: #cce5ff;
-                color: #000000;
-            }
-            QHeaderView::section {
-                background: #e8eaed;
-                border: 1px solid #c8c8c8;
-                padding: 4px 6px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-        """)
-
-        # Wire cell-change → currentItemChanged for back-compat
-        self.currentCellChanged.connect(self._onCellChanged)
-
-    # ── Compat API ────────────────────────────────────────────────────────
-
-    def clear(self):
-        """Remove all rows and reset original-text cache."""
-        self.setRowCount(0)
-        self._origTexts.clear()
-
-    def count(self) -> int:
-        return self.rowCount()
-
-    def currentRow(self) -> int:
-        return self.currentRow() if False else super().currentRow()
-
-    def setCurrentRow(self, row: int):
-        if 0 <= row < self.rowCount():
-            self.selectRow(row)
-        elif self.rowCount() == 0:
-            self.clearSelection()
-
-    # ── Population ────────────────────────────────────────────────────────
-
-    def addSubtitleRow(self, index: int, text: str,
-                       origText: str = "", modified: bool = False):
-        """Append a subtitle row.
-
-        Args:
-            index:    display index (0-based)
-            text:     current (possibly edited) text
-            origText: original text for comparison column
-            modified: whether to show the bullet marker
-        """
-        row = self.rowCount()
-        self.insertRow(row)
-        self._origTexts.append(origText or text)
-
-        # Column data
-        idxItem  = QTableWidgetItem(str(index + 1))
-        origItem = QTableWidgetItem((origText or text).replace("｜", "\n"))
-        editItem = QTableWidgetItem(text.replace("｜", "\n"))
-        markItem = QTableWidgetItem("●" if modified else "")
-
-        # Alignment
-        idxItem.setTextAlignment(Qt.AlignCenter)
-        origItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        editItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        markItem.setTextAlignment(Qt.AlignCenter)
-
-        # Non-editable flags
-        for item in (idxItem, origItem, editItem, markItem):
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-
-        self.setItem(row, self.COL_IDX,  idxItem)
-        self.setItem(row, self.COL_ORIG, origItem)
-        self.setItem(row, self.COL_EDIT, editItem)
-        self.setItem(row, self.COL_MARK, markItem)
-
-        # Alternating row colour
-        bg = self.COLOR_ODD if row % 2 == 0 else self.COLOR_EVEN
-        for col in range(self.columnCount()):
-            it = self.item(row, col)
-            if it:
-                it.setBackground(bg)
-
-        # Auto row height based on text length
-        self.resizeRowToContents(row)
-
-    def setRadioMode(self, radio: bool):
-        """In Radio mode hide the Original column — there is no separate original/edited."""
-        if radio:
-            self.setColumnHidden(self.COL_ORIG, True)
-            self.setHorizontalHeaderLabels(["#", "Original", "Subtitle", "✓"])
-        else:
-            self.setColumnHidden(self.COL_ORIG, False)
-            self.setHorizontalHeaderLabels(["#", "Original", "Edited", "✓"])
-
-    def updateRowMark(self, row: int, modified: bool):
-        """Update the ✓ column for an existing row."""
-        if 0 <= row < self.rowCount():
-            it = self.item(row, self.COL_MARK)
-            if it:
-                it.setText("●" if modified else "")
-
-    def updateRowEditText(self, row: int, text: str):
-        """Update the Edited column for an existing row."""
-        if 0 <= row < self.rowCount():
-            it = self.item(row, self.COL_EDIT)
-            if it:
-                it.setText(text.replace("｜", "\n"))
-            self.resizeRowToContents(row)
-
-    # ── Internal ──────────────────────────────────────────────────────────
-
-    def _onCellChanged(self, curRow, _curCol, prevRow, _prevCol):
-        cur  = self.item(curRow,  0) if curRow  >= 0 else None
-        prev = self.item(prevRow, 0) if prevRow >= 0 else None
-        self.currentItemChanged.emit(cur, prev)
-
-
-class EntryTableWidget(QTableWidget):
-    """Excel-style table for offsetListBox and audioCueListView.
-
-    Columns:
-      0 – #      (index, narrow, fixed)
-      1 – Block (the string value — offset, name, etc.)
-      2 – ✓      (bullet marker for modified/altered entries, narrow)
-
-    Compatible subset of QListWidget API used by OffsetListWidget /
-    audioCueListView in MainWindow:
-      addItem(text, userData=None), clear(), count(),
-      currentRow(), setCurrentRow(), currentIndex(), setCurrentIndex(),
-      findData(data), currentData(),
-      currentIndexChanged signal,
-      blockSignals(bool).
-    """
-
-    COL_IDX  = 0
-    COL_TEXT = 1
-    COL_MARK = 2
-
-    COLOR_ODD  = QColor(255, 255, 255)
-    COLOR_EVEN = QColor(240, 242, 245)
-
-    currentIndexChanged = Signal(int)
-    currentItemChanged  = Signal(object, object)   # for audioCueListView compat
-
-    def __init__(self, parent=None):
-        super().__init__(0, 3, parent)
-        self._userData: list = []
-
-        # ── Header ───────────────────────────────────────────────────────
-        self.setHorizontalHeaderLabels(["#", "Block", "✓"])
-        hdr = self.horizontalHeader()
-        hdr.setSectionResizeMode(self.COL_IDX,  QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(self.COL_TEXT, QHeaderView.Stretch)
-        hdr.setSectionResizeMode(self.COL_MARK, QHeaderView.ResizeToContents)
-        hdr.setHighlightSections(False)
-        hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-
-        self.verticalHeader().setVisible(False)
-
-        # ── Behaviour ────────────────────────────────────────────────────
-        self.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.setAlternatingRowColors(False)
-        self.setShowGrid(True)
-        self.setGridStyle(Qt.SolidLine)
-
-        self.setStyleSheet("""
-            QTableWidget {
-                gridline-color: #c8c8c8;
-                border: 1px solid #b0b0b0;
-                font-size: 12px;
-            }
-            QTableWidget::item {
-                padding: 2px 6px;
-                border: none;
-            }
-            QTableWidget::item:selected {
-                background: #cce5ff;
-                color: #000000;
-            }
-            QHeaderView::section {
-                background: #e8eaed;
-                border: 1px solid #c8c8c8;
-                padding: 3px 6px;
-                font-weight: bold;
-                font-size: 12px;
-            }
-        """)
-
-        self.currentCellChanged.connect(self._onCellChanged)
-
-    # ── QListWidget-compatible API ────────────────────────────────────────
-
-    def addItem(self, text: str, userData=None, modified: bool = False):
-        row = self.rowCount()
-        self.insertRow(row)
-        self._userData.append(userData)
-
-        idxItem  = QTableWidgetItem(str(row + 1))
-        textItem = QTableWidgetItem(str(text))
-        markItem = QTableWidgetItem("●" if modified else "")
-
-        idxItem.setTextAlignment(Qt.AlignCenter)
-        textItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        markItem.setTextAlignment(Qt.AlignCenter)
-
-        for item in (idxItem, textItem, markItem):
-            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-
-        self.setItem(row, self.COL_IDX,  idxItem)
-        self.setItem(row, self.COL_TEXT, textItem)
-        self.setItem(row, self.COL_MARK, markItem)
-
-        bg = self.COLOR_ODD if row % 2 == 0 else self.COLOR_EVEN
-        for col in range(self.columnCount()):
-            it = self.item(row, col)
-            if it:
-                it.setBackground(bg)
-
-    def clear(self):
-        self.setRowCount(0)
-        self._userData.clear()
-
-    def count(self) -> int:
-        return self.rowCount()
-
-    def currentIndex(self) -> int:
-        return self.currentRow()
-
-    def setCurrentIndex(self, idx: int):
-        self.setCurrentRow(idx)
-
-    def setCurrentRow(self, idx: int):
-        if 0 <= idx < self.rowCount():
-            self.selectRow(idx)
-        elif self.rowCount() == 0:
-            self.clearSelection()
-
-    def currentData(self):
-        idx = self.currentRow()
-        if 0 <= idx < len(self._userData):
-            return self._userData[idx]
-        return None
-
-    def findData(self, data) -> int:
-        try:
-            return self._userData.index(data)
-        except ValueError:
-            return -1
-
-    def currentItem(self):
-        """Return a proxy object whose .text() returns the Block column value."""
-        row = self.currentRow()
-        if row < 0:
-            return None
-        it = self.item(row, self.COL_TEXT)
-        return it   # QTableWidgetItem already has .text()
-
-    # ── Internal ──────────────────────────────────────────────────────────
-
-    def _onCellChanged(self, curRow, _curCol, prevRow, _prevCol):
-        self.currentIndexChanged.emit(curRow)
-        cur  = self.item(curRow,  self.COL_TEXT) if curRow  >= 0 else None
-        prev = self.item(prevRow, self.COL_TEXT) if prevRow >= 0 else None
-        self.currentItemChanged.emit(cur, prev)
-
 class XmlFileDialog(QFileDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -691,7 +338,7 @@ class NotificationDialog(QDialog):
         self.setWindowTitle(title)
         layout = QVBoxLayout()
         layout.addWidget(QLabel(message))
-        ok_button = QPushButton("✓ OK")
+        ok_button = QPushButton("OK")
         ok_button.clicked.connect(self.accept)
         layout.addWidget(ok_button)
         self.setLayout(layout)
@@ -787,11 +434,11 @@ class PreferencesDialog(QDialog):
 
         # ── Buttons ───────────────────────────────────────────────────────
         btnRow = QHBoxLayout()
-        btnOk = QPushButton("✓ OK")
+        btnOk = QPushButton("OK")
         btnOk.setDefault(True)
         btnOk.clicked.connect(self.accept)
         btnRow.addWidget(btnOk)
-        btnCancel = QPushButton("✘ Cancel")
+        btnCancel = QPushButton("Cancel")
         btnCancel.clicked.connect(self.reject)
         btnRow.addWidget(btnCancel)
         layout.addLayout(btnRow)
@@ -877,7 +524,7 @@ class FinalizeProjectDialog(QDialog):
     """Dialog for batch-compiling all (or selected) game data files."""
     def __init__(self, stageDirPath="", defaultOutputDir="", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("✓ Finalize Project")
+        self.setWindowTitle("Finalize Project")
         self.setMinimumWidth(480)
         layout = QVBoxLayout()
 
@@ -993,11 +640,11 @@ class FinalizeProjectDialog(QDialog):
         layout.addWidget(outGroup)
 
         btnRow = QHBoxLayout()
-        btnFinalize = QPushButton("✓ Finalize")
+        btnFinalize = QPushButton("Finalize")
         btnFinalize.setDefault(True)
         btnFinalize.clicked.connect(self.accept)
         btnRow.addWidget(btnFinalize)
-        btnCancel = QPushButton("✘ Cancel")
+        btnCancel = QPushButton("Cancel")
         btnCancel.clicked.connect(self.reject)
         btnRow.addWidget(btnCancel)
         layout.addLayout(btnRow)
@@ -1092,7 +739,7 @@ class FontEditorDialog(QDialog):
 
     def __init__(self, tblMapping=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("語 Font Editor")
+        self.setWindowTitle("Font Editor")
         self.setMinimumSize(900, 600)
 
         from scripts.fontTools import mgsFontTools as MFT
@@ -1132,13 +779,13 @@ class FontEditorDialog(QDialog):
 
         # ── Top bar ──────────────────────────────────────────────────────
         topRow = QHBoxLayout()
-        self.btnLoadStageDir = QPushButton("🔄 Load STAGE.DIR...")
+        self.btnLoadStageDir = QPushButton("Load STAGE.DIR...")
         self.btnLoadStageDir.clicked.connect(self._loadStageDir)
         topRow.addWidget(self.btnLoadStageDir)
-        self.btnLoadTbl = QPushButton("🔄 Load .tbl...")
+        self.btnLoadTbl = QPushButton("Load .tbl...")
         self.btnLoadTbl.clicked.connect(self._loadTbl)
         topRow.addWidget(self.btnLoadTbl)
-        self.btnSaveTbl = QPushButton("💾 Save .tbl...")
+        self.btnSaveTbl = QPushButton("Save .tbl...")
         self.btnSaveTbl.clicked.connect(self._saveTbl)
         topRow.addWidget(self.btnSaveTbl)
         topRow.addStretch()
@@ -1213,10 +860,10 @@ class FontEditorDialog(QDialog):
         self._widthLabel.setVisible(False)
         self._widthSpin.setVisible(False)
 
-        self.btnImportPng = QPushButton("↑ Import PNG...")
+        self.btnImportPng = QPushButton("Import PNG...")
         self.btnImportPng.clicked.connect(self._importSinglePng)
         detailLayout.addWidget(self.btnImportPng)
-        self.btnExportPng = QPushButton("↓ Export PNG...")
+        self.btnExportPng = QPushButton("Export PNG...")
         self.btnExportPng.clicked.connect(self._exportSinglePng)
         detailLayout.addWidget(self.btnExportPng)
 
@@ -1228,14 +875,14 @@ class FontEditorDialog(QDialog):
 
         # ── Bottom bar ───────────────────────────────────────────────────
         bottomRow = QHBoxLayout()
-        btnExportAll = QPushButton("⇓ Export All Glyphs...")
+        btnExportAll = QPushButton("Export All Glyphs...")
         btnExportAll.clicked.connect(self._exportAll)
         bottomRow.addWidget(btnExportAll)
-        btnImportFolder = QPushButton("⇑ Import Glyphs from Folder...")
+        btnImportFolder = QPushButton("Import Glyphs from Folder...")
         btnImportFolder.clicked.connect(self._importFolder)
         bottomRow.addWidget(btnImportFolder)
         bottomRow.addStretch()
-        self.btnApply = QPushButton("✓ Apply to STAGE.DIR...")
+        self.btnApply = QPushButton("Apply to STAGE.DIR...")
         self.btnApply.clicked.connect(self._applyToStageDir)
         self.btnApply.setEnabled(False)
         bottomRow.addWidget(self.btnApply)
@@ -1629,30 +1276,6 @@ class MainWindow(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
-        # Fix window size — no resize, no maximize.
-        # WindowFlags are set now; actual size is locked in showEvent()
-        # after all widgets have been laid out.
-        self.setWindowFlags(
-            self.windowFlags()
-            & ~Qt.WindowType.WindowMaximizeButtonHint
-            & ~Qt.WindowType.WindowFullscreenButtonHint
-        )
-
-        # Remove the border around the Preview panel (comes from ui_form)
-        _previewParent = self.ui.graphicsView.parentWidget()
-        while _previewParent is not None:
-            if hasattr(_previewParent, 'setFlat'):       # QGroupBox
-                _previewParent.setFlat(True)
-                _previewParent.setStyleSheet(
-                    "QGroupBox { border: none; padding: 0; margin: 0; }"
-                )
-                break
-            if hasattr(_previewParent, 'setFrameShape'):  # QFrame
-                from PySide6.QtWidgets import QFrame as _QFrame
-                _previewParent.setFrameShape(_QFrame.Shape.NoFrame)
-                break
-            _previewParent = _previewParent.parentWidget()
-
         # App icon
         iconPath = os.path.join(os.path.dirname(__file__), "icon.png")
         if os.path.exists(iconPath):
@@ -1676,8 +1299,9 @@ class MainWindow(QMainWindow):
         oldCombo.setVisible(False)
 
         offsetRow = QHBoxLayout()
-        self.ui.offsetListBox = EntryTableWidget(self)
-        self.ui.offsetListBox.setMaximumHeight(180)  # ~6 rows
+        self.ui.offsetListBox = OffsetListWidget(self)
+        self.ui.offsetListBox.setMaximumHeight(160)  # ~8 rows
+        self.ui.offsetListBox.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         offsetRow.addWidget(self.ui.offsetListBox, stretch=1)
 
         # Right side: freq filter, prev, next — stacked, vertically centered
@@ -1708,49 +1332,11 @@ class MainWindow(QMainWindow):
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
-
-        # ── Replace audioCueListView with EntryTableWidget ────────────────
-        _oldCue = self.ui.audioCueListView
-        _cueParent = _oldCue.parentWidget()
-        _cueLayout = _cueParent.layout() if _cueParent else None
-        _cueIdx = _cueLayout.indexOf(_oldCue) if _cueLayout else -1
-        _oldCue.hide()
-        _oldCue.setParent(None)
-        self.ui.audioCueListView = EntryTableWidget(_cueParent)
-        self.ui.audioCueListView.setMaximumHeight(130)
-        if _cueLayout is not None and _cueIdx >= 0:
-            _cueLayout.insertWidget(_cueIdx, self.ui.audioCueListView)
-        elif _cueLayout is not None:
-            _cueLayout.addWidget(self.ui.audioCueListView)
-
         self.ui.audioCueListView.currentItemChanged.connect(self.selectAudioCue)
-
-        # ── Replace subsPreviewList with SubtitleTableWidget ─────────────
-        _oldSubs = self.ui.subsPreviewList
-        _subsParent = _oldSubs.parentWidget()
-        _subsLayout = _subsParent.layout() if _subsParent else None
-        _subsIdx = _subsLayout.indexOf(_oldSubs) if _subsLayout else -1
-        _oldSubs.hide()
-        _oldSubs.setParent(None)
-        self.ui.subsPreviewList = SubtitleTableWidget(_subsParent)
-        if _subsLayout is not None and _subsIdx >= 0:
-            _subsLayout.insertWidget(_subsIdx, self.ui.subsPreviewList)
-        elif _subsLayout is not None:
-            _subsLayout.addWidget(self.ui.subsPreviewList)
-
         self.ui.subsPreviewList.currentItemChanged.connect(self.subtitleSelect)
 
         # ── Audio ────────────────────────────────────────────────────────────
         self.ui.playVoxButton.clicked.connect(self.playVoxFile)
-
-        # Keep radio-only widgets occupying their space even when hidden,
-        # so the audio control row has the same width in all modes.
-        for _w in (self.ui.FreqLabel, self.ui.FreqDisplay,
-                   self.ui.VoxBlockAddressLabel, self.ui.VoxBlockAddressDisplay,
-                   self.ui.VoxAddressLabel, self.ui.VoxAddressDisplay):
-            _sp = _w.sizePolicy()
-            _sp.setRetainSizeWhenHidden(True)
-            _w.setSizePolicy(_sp)
 
         # ── Edit buttons (added programmatically) ────────────────────────────
         self._addEditButtons()
@@ -1776,32 +1362,32 @@ class MainWindow(QMainWindow):
         # (nav buttons are now beside the offset list widget above)
 
         # ── Build File menu from scratch ──────────────────────────────────────
-        self.actionOpenFolder = QAction("📂 Open Folder...", self)
+        self.actionOpenFolder = QAction("Open Folder...", self)
         self.actionOpenFolder.setStatusTip("Find and load RADIO.DAT, DEMO.DAT, VOX.DAT, ZMOVIE.STR from a folder")
         self.actionOpenFolder.setShortcut("Ctrl+O")
         self.actionOpenFolder.triggered.connect(self.openFolder)
 
-        self.actionOpenProject = QAction("⏏︎ Open Project (.mtp)...", self)
+        self.actionOpenProject = QAction("Open Project (.mtp)...", self)
         self.actionOpenProject.setStatusTip("Open a saved MTP project file")
         self.actionOpenProject.setShortcut("Ctrl+P")
         self.actionOpenProject.triggered.connect(self.openProject)
 
-        self.actionSaveProject = QAction("💾 Save Project", self)
+        self.actionSaveProject = QAction("Save Project", self)
         self.actionSaveProject.setStatusTip("Save the current project to its .mtp file")
         self.actionSaveProject.setShortcut("Ctrl+S")
         self.actionSaveProject.setEnabled(False)
         self.actionSaveProject.triggered.connect(self.saveProject)
 
-        self.actionSaveProjectAs = QAction("💾 Save Project As...", self)
+        self.actionSaveProjectAs = QAction("Save Project As...", self)
         self.actionSaveProjectAs.setStatusTip("Save the current project to a new .mtp file")
         self.actionSaveProjectAs.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_S))
         self.actionSaveProjectAs.triggered.connect(self.saveProjectAs)
 
-        self.actionFinalizeProject = QAction("✓ Finalize Project...", self)
+        self.actionFinalizeProject = QAction("Finalize Project...", self)
         self.actionFinalizeProject.setStatusTip("Batch-compile all game data files")
         self.actionFinalizeProject.triggered.connect(self.finalizeProject)
 
-        actionQuit = QAction("⏻︎ Quit", self)
+        actionQuit = QAction("Quit", self)
         actionQuit.setShortcut("Ctrl+Q")
         actionQuit.triggered.connect(self.close)
 
@@ -1822,15 +1408,15 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QFrame
         quitIdx = self.ui.verticalLayout_4.indexOf(self.ui.quitButton)
 
-        btnOpenFolder = QPushButton("📂 Open Folder...")
+        btnOpenFolder = QPushButton("Open Folder...")
         btnOpenFolder.clicked.connect(self.openFolder)
         self.ui.verticalLayout_4.insertWidget(quitIdx, btnOpenFolder)
 
-        btnOpenProject = QPushButton("⏏︎ Open Project (.mtp)...")
+        btnOpenProject = QPushButton("Open Project (.mtp)...")
         btnOpenProject.clicked.connect(self.openProject)
         self.ui.verticalLayout_4.insertWidget(quitIdx + 1, btnOpenProject)
 
-        btnFinalize = QPushButton("✓ Finalize Project...")
+        btnFinalize = QPushButton("Finalize Project...")
         btnFinalize.clicked.connect(self.finalizeProject)
         self.ui.verticalLayout_4.insertWidget(quitIdx + 2, btnFinalize)
 
@@ -1874,7 +1460,7 @@ class MainWindow(QMainWindow):
 
         # ── Tools menu ──────────────────────────────────────────────────────
         toolsMenu = self.menuBar().addMenu("Tools")
-        self.actionFontEditor = QAction("語 Font Editor...", self)
+        self.actionFontEditor = QAction("Font Editor...", self)
         self.actionFontEditor.setStatusTip("Extract, edit, and inject game font glyphs")
         self.actionFontEditor.triggered.connect(self._openFontEditor)
         toolsMenu.addAction(self.actionFontEditor)
@@ -1905,8 +1491,6 @@ class MainWindow(QMainWindow):
 
         # Elapsed timer for subtitle sync — started when ffplay launches
         self._elapsed = QElapsedTimer()
-        self._pausedElapsed: int = 0
-        self._isPaused: bool = False
         # Tracks which demo keys have already had fps estimated (so we only print once each)
         self._fpsEstimated: set = set()
 
@@ -1939,39 +1523,39 @@ class MainWindow(QMainWindow):
         # ── Button column (right side) ────────────────────────────────────
         btnCol = QVBoxLayout()
 
-        self.applyEditButton = QPushButton("→ Apply Edit")
+        self.applyEditButton = QPushButton("Apply Edit")
         self.applyEditButton.setToolTip("Save text and timing changes (Cmd+Enter)")
         self.applyEditButton.setEnabled(False)
         self.applyEditButton.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Return))
         self.applyEditButton.clicked.connect(self.applyEdit)
         btnCol.addWidget(self.applyEditButton)
 
-        self.splitSubButton = QPushButton("÷ Split Subtitle")
+        self.splitSubButton = QPushButton("Split Subtitle")
         self.splitSubButton.setToolTip("Split this subtitle in two, halving the display duration")
         self.splitSubButton.setEnabled(False)
         self.splitSubButton.clicked.connect(self.splitSubtitle)
         btnCol.addWidget(self.splitSubButton)
 
-        self.deleteSubButton = QPushButton("␡ Delete Subtitle")
+        self.deleteSubButton = QPushButton("Delete Subtitle")
         self.deleteSubButton.setToolTip("Remove this subtitle from the call")
         self.deleteSubButton.setEnabled(False)
         self.deleteSubButton.clicked.connect(self.deleteSubtitle)
         btnCol.addWidget(self.deleteSubButton)
 
-        self.revertVoxButton = QPushButton("⎌ Revert to Original")
+        self.revertVoxButton = QPushButton("Revert to Original")
         self.revertVoxButton.setToolTip("Discard changes and restore the original VOX entry")
         self.revertVoxButton.setVisible(False)
         self.revertVoxButton.clicked.connect(self._revertVoxEntry)
         btnCol.addWidget(self.revertVoxButton)
 
-        self.translateButton = QPushButton("✎ Translate")
+        self.translateButton = QPushButton("Translate")
         self.translateButton.setToolTip("Translate the current line (Cmd+T)")
         self.translateButton.setEnabled(False)
         self.translateButton.setShortcut("Ctrl+T")
         self.translateButton.clicked.connect(self._translateLine)
         btnCol.addWidget(self.translateButton)
 
-        self.autoFormatButton = QPushButton("☰ Auto-format")
+        self.autoFormatButton = QPushButton("Auto-format")
         self.autoFormatButton.setToolTip("Re-wrap text with pixel-accurate MGS1 line breaks (Cmd+F)")
         self.autoFormatButton.setEnabled(False)
         self.autoFormatButton.setShortcut("Ctrl+F")
@@ -1987,16 +1571,10 @@ class MainWindow(QMainWindow):
         self.ui.verticalLayout_2.addLayout(bottomRow)
 
         # ── Stop button — inserted into the StatusBar row next to Play ────────
-        self.stopVoxButton = QPushButton("⏹︎")
+        self.stopVoxButton = QPushButton("⏹︎ Stop")
         self.stopVoxButton.setToolTip("Stop audio playback")
         self.stopVoxButton.setEnabled(False)
-        self.stopVoxButton.setFixedWidth(36)
         self.stopVoxButton.clicked.connect(self.stopVoxFile)
-
-        # Rename the play button and make it also handle pause/resume
-        self.ui.playVoxButton.setText("▶")
-        self.ui.playVoxButton.setFixedWidth(36)
-
         play_idx = self.ui.horizontalLayout_2.indexOf(self.ui.playVoxButton)
         self.ui.horizontalLayout_2.insertWidget(play_idx + 1, self.stopVoxButton)
 
@@ -2107,8 +1685,9 @@ class MainWindow(QMainWindow):
                 offset = voxSeqToOffset.get(name)
                 if offset and int(offset) in _radioClaimedVoxAddrs:
                     continue
-            modified = name in voxAlteredJson
-            self.ui.offsetListBox.addItem(name, userData=name, modified=modified)
+            # Mark altered entries with a bullet
+            label = f"\u2022 {name}" if name in voxAlteredJson else name
+            self.ui.offsetListBox.addItem(label, userData=name)
         self.ui.offsetListBox.blockSignals(False)
         idx = self.ui.offsetListBox.findData(current)
         self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
@@ -2269,7 +1848,7 @@ class MainWindow(QMainWindow):
 
         self.ui.audioCueListView.clear()
         for i, audio in enumerate(radioManager.getVoxOffsets()):
-            self.ui.audioCueListView.addItem(audio, userData=audio)
+            QListWidgetItem(f"{self._idxPrefix(i)}{audio}", self.ui.audioCueListView)
 
         self._clearEditor()
 
@@ -2281,7 +1860,7 @@ class MainWindow(QMainWindow):
             self.ui.subsPreviewList.clear()
             for i, sub in enumerate(radioManager.workingCall.findall("SUBTITLE")):
                 text = sub.get("text", "")
-                self.ui.subsPreviewList.addSubtitleRow(i, text)
+                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2298,18 +1877,10 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         # Prefer altered, fall back to original
         subtitles = demoAlteredJson.get(key, demoOriginalJson.get(key, {}))
-        _demoOrig = demoOriginalJson.get(key, {})
-        _origFrames = sorted(_demoOrig.keys(), key=int)
         for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            if i < len(_origFrames):
-                origSub = _demoOrig[_origFrames[i]]
-                origText = origSub.get("text", "").strip() or f"[Frame {_origFrames[i]}]"
-            else:
-                origText = text
-            modified = key in demoAlteredJson
-            self.ui.subsPreviewList.addSubtitleRow(i, text, origText=origText, modified=modified)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         # Enable revert button only if this entry has been altered
         self.revertVoxButton.setVisible(self._editorMode == "demo" and key in demoAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
@@ -2328,18 +1899,10 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         # Prefer altered, fall back to original
         subtitles = zmovieAlteredJson.get(key, zmovieOriginalJson.get(key, {}))
-        _zmOrig = zmovieOriginalJson.get(key, {})
-        _origFrames = sorted(_zmOrig.keys(), key=int)
         for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            if i < len(_origFrames):
-                origSub = _zmOrig[_origFrames[i]]
-                origText = origSub.get("text", "").strip() or f"[Frame {_origFrames[i]}]"
-            else:
-                origText = text
-            modified = key in zmovieAlteredJson
-            self.ui.subsPreviewList.addSubtitleRow(i, text, origText=origText, modified=modified)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         self.revertVoxButton.setVisible(self._editorMode == "zmovie" and key in zmovieAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
@@ -2357,18 +1920,10 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         # Prefer altered, fall back to original
         subtitles = voxAlteredJson.get(key, voxOriginalJson.get(key, {}))
-        _voxOrig = voxOriginalJson.get(key, {})
-        _origFrames = sorted(_voxOrig.keys(), key=int)
         for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            if i < len(_origFrames):
-                origSub = _voxOrig[_origFrames[i]]
-                origText = origSub.get("text", "").strip() or f"[Frame {_origFrames[i]}]"
-            else:
-                origText = text
-            modified = key in voxAlteredJson
-            self.ui.subsPreviewList.addSubtitleRow(i, text, origText=origText, modified=modified)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         # Enable revert button only if this entry has been altered
         self.revertVoxButton.setVisible(self._editorMode == "vox" and key in voxAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
@@ -2378,7 +1933,7 @@ class MainWindow(QMainWindow):
         global currentSubIndex, currentVoxOffset
         if item is None:
             return
-        offset = self.ui.audioCueListView.currentItem().text()
+        offset = self.ui.audioCueListView.currentItem().text().split("  ", 1)[-1]
         radioManager.setWorkingVox(offset)
         currentSubIndex = -1
 
@@ -2393,7 +1948,7 @@ class MainWindow(QMainWindow):
 
         self.ui.subsPreviewList.clear()
         for i, text in enumerate(radioManager.getSubs()):
-            self.ui.subsPreviewList.addSubtitleRow(i, text)
+            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
 
         self._clearEditor()
         if self.ui.subsPreviewList.count() > 0:
@@ -2445,12 +2000,6 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.setEnabled(True)
         self.splitSubButton.setEnabled(True)
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
-
-        # ── Update preview immediately (no playback needed) ──────────────
-        preview_text = self.ui.DialogueEditorBox.toPlainText()
-        if not self._frameTimer.isActive():   # only when not already playing
-            self._previewTextItem.setPlainText(preview_text)
-            self._positionPreviewText()
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
 
@@ -2827,32 +2376,13 @@ class MainWindow(QMainWindow):
         if self._editorMode in ("demo", "vox", "zmovie"):
             key, djson = self._modeData()
             subtitles = djson.get(key, {})
-            # Determine original dict for comparison column
-            if self._editorMode == "demo":
-                _origJson = demoOriginalJson.get(key, {})
-                _isModified = key in demoAlteredJson
-            elif self._editorMode == "vox":
-                _origJson = voxOriginalJson.get(key, {})
-                _isModified = key in voxAlteredJson
-            else:
-                _origJson = zmovieOriginalJson.get(key, {})
-                _isModified = key in zmovieAlteredJson
-            # Sort both dicts by frame number so we can match by position
-            _origFrames = sorted(_origJson.keys(), key=int)
             for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
                 sub = subtitles[startFrame]
                 text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-                # Match original by position (index), not by startFrame key,
-                # so the Original column stays stable even if timing was edited
-                if i < len(_origFrames):
-                    origSub = _origJson[_origFrames[i]]
-                    origText = origSub.get("text", "").strip() or f"[Frame {_origFrames[i]}]"
-                else:
-                    origText = text
-                self.ui.subsPreviewList.addSubtitleRow(i, text, origText=origText, modified=_isModified)
+                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         else:
             for i, text in enumerate(radioManager.getSubs()):
-                self.ui.subsPreviewList.addSubtitleRow(i, text)
+                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
 
     def _idxPrefix(self, i: int) -> str:
         """Return a zero-padded index prefix if the setting is enabled, else empty string."""
@@ -2877,24 +2407,6 @@ class MainWindow(QMainWindow):
     # ── Audio ─────────────────────────────────────────────────────────────────
 
     def playVoxFile(self):
-        # If already playing: pause. If paused: resume. If stopped: start fresh.
-        state = self._mediaPlayer.playbackState()
-        if state == QMediaPlayer.PlaybackState.PlayingState:
-            self._mediaPlayer.pause()
-            self._frameTimer.stop()
-            self._pausedElapsed += self._elapsed.elapsed()
-            self._isPaused = True
-            self.ui.playVoxButton.setText("▶")
-            self.statusBar().showMessage("Paused", 0)
-            return
-        if state == QMediaPlayer.PlaybackState.PausedState:
-            self._mediaPlayer.play()
-            self._elapsed.restart()
-            self._frameTimer.start()
-            self._isPaused = False
-            self.ui.playVoxButton.setText("⏸")
-            self.statusBar().showMessage("Playing…", 0)
-            return
         if self._editorMode == "zmovie":
             return self._playZmovieVideo()
         elif self._editorMode == "demo":
@@ -2961,7 +2473,6 @@ class MainWindow(QMainWindow):
         self._convThread.start()
 
         self.ui.playVoxButton.setEnabled(False)
-        self.ui.playVoxButton.setText("⏳")
         self.stopVoxButton.setEnabled(True)
         self.statusBar().showMessage("Converting…")
 
@@ -2987,11 +2498,6 @@ class MainWindow(QMainWindow):
         self._showGraphicsHideVideo()
         self._resetPlaybackButtons()
 
-    def showEvent(self, event):
-        """Lock the window to its natural size once all widgets are laid out."""
-        super().showEvent(event)
-        self.setFixedSize(self.size())
-
     def closeEvent(self, event):
         """Warn about unsaved edits, then kill audio before closing."""
         if self._modified:
@@ -3008,38 +2514,15 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _onConversionDone(self, wavPath: str):
-        """Play the converted WAV via QMediaPlayer (supports real pause)."""
+        """Launch ffplay on the converted WAV and start the subtitle timer."""
         self._estimateSubtitleFps(wavPath)
-        self._currentWavPath = wavPath
-        # Disconnect zmovie state handler temporarily so it does not interfere
-        try:
-            self._mediaPlayer.playbackStateChanged.disconnect(self._onVideoStateChanged)
-        except Exception:
-            pass
-        self._mediaPlayer.playbackStateChanged.connect(self._onVoxStateChanged)
-        self._mediaPlayer.setVideoOutput(None)  # audio-only
-        self._mediaPlayer.setSource(QUrl.fromLocalFile(wavPath))
-        self._mediaPlayer.play()
+        self._playThread = FfplayThread(wavPath, parent=self)
+        self._playThread.playbackFinished.connect(self._onPlaybackFinished)
+        self._playThread.errorOccurred.connect(self._onPlaybackError)
+        self._playThread.start()
         self._elapsed.restart()
-        self._pausedElapsed = 0
-        self._isPaused = False
         self._frameTimer.start()
-        self.ui.playVoxButton.setEnabled(True)
-        self.ui.playVoxButton.setText("⏸")
         self.statusBar().showMessage("Playing…")
-
-    def _onVoxStateChanged(self, state):
-        """Handle QMediaPlayer state changes for VOX/DEMO WAV playback."""
-        if state == QMediaPlayer.PlaybackState.StoppedState:
-            # Reconnect zmovie handler
-            try:
-                self._mediaPlayer.playbackStateChanged.disconnect(self._onVoxStateChanged)
-            except Exception:
-                pass
-            self._mediaPlayer.playbackStateChanged.connect(self._onVideoStateChanged)
-            self._mediaPlayer.setVideoOutput(self._videoWidget)
-            if not self._isPaused:
-                self._onPlaybackFinished()
 
     def _estimateSubtitleFps(self, wavPath: str):
         """
@@ -3117,13 +2600,13 @@ class MainWindow(QMainWindow):
         self._zmovieConvThread.start()
 
         self.ui.playVoxButton.setEnabled(False)
-        self.ui.playVoxButton.setText("⏳")
         self.stopVoxButton.setEnabled(True)
         self.statusBar().showMessage("Converting zmovie to MP4…")
 
     def _onZmovieConversionDone(self, mp4Path: str):
         """Load the converted MP4 into QMediaPlayer and start video playback."""
-        self._previewStack.setCurrentIndex(1)  # show video page
+        self.ui.graphicsView.setVisible(False)
+        self._videoWidget.setVisible(True)
         self._mediaPlayer.setSource(QUrl.fromLocalFile(mp4Path))
         self._mediaPlayer.play()
         self._frameTimer.start()
@@ -3138,8 +2621,9 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Video playback finished.", 2000)
 
     def _showGraphicsHideVideo(self):
-        """Switch preview stack to the graphicsView page (page 0)."""
-        self._previewStack.setCurrentIndex(0)
+        """Restore graphicsView and hide the video widget."""
+        self._videoWidget.setVisible(False)
+        self.ui.graphicsView.setVisible(True)
 
     def _resetPlaybackButtons(self):
         if self._editorMode == "zmovie":
@@ -3147,77 +2631,33 @@ class MainWindow(QMainWindow):
         else:
             can_play = bool(voxManager) or bool(demoManager)
         self.ui.playVoxButton.setEnabled(can_play)
-        self.ui.playVoxButton.setText("▶")
         self.stopVoxButton.setEnabled(False)
-        self._isPaused = False
-        self._pausedElapsed = 0
 
     # ── Subtitle preview ──────────────────────────────────────────────────────
 
     def _setupSubtitlePreview(self):
-        """Initialise the QGraphicsScene used for the subtitle preview.
-
-        The preview is fixed at 320×240 px and always shows src/template.png
-        as background at its native resolution (no rescaling).
-        """
-        # ── Fixed 320×240 view ───────────────────────────────────────────
-        self.ui.graphicsView.setFixedSize(320, 240)
+        """Initialise the QGraphicsScene used for the subtitle preview."""
+        self._previewScene = QGraphicsScene(self)
+        self._previewScene.setBackgroundBrush(QColor(0, 0, 0))
+        self.ui.graphicsView.setScene(self._previewScene)
         self.ui.graphicsView.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.ui.graphicsView.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.ui.graphicsView.setFrameShape(QFrame.Shape.NoFrame)
-        # Let Qt centre the scene in the view automatically
-        self.ui.graphicsView.setAlignment(Qt.AlignCenter)
 
-        self._previewScene = QGraphicsScene(0, 0, 320, 240, self)
-        self.ui.graphicsView.setScene(self._previewScene)
-        # Make the view show exactly the 320×240 scene with no margins
-        self.ui.graphicsView.setSceneRect(0, 0, 320, 240)
-
-        # ── Background: load src/template.png at native resolution ───────
-        _src_dir = os.path.dirname(os.path.abspath(__file__))
-        _template_path = os.path.join(_src_dir, "template.png")
-        _bg_px = QPixmap(_template_path)
-        if _bg_px.isNull():
-            # File missing or unreadable — fall back to solid black
-            self._previewScene.setBackgroundBrush(QColor(0, 0, 0))
-        else:
-            self._previewScene.setBackgroundBrush(QColor(0, 0, 0))
-            _bgItem = QGraphicsPixmapItem(_bg_px)
-            _bgItem.setZValue(0)
-            _bgItem.setPos(0, 0)
-            self._previewScene.addItem(_bgItem)
-            # Size the scene exactly to the image so Qt's AlignCenter
-            # centres it perfectly within the 320×240 view
-            self._previewScene.setSceneRect(0, 0, _bg_px.width(), _bg_px.height())
-
-        # ── Subtitle text item (always on top) ───────────────────────────
         self._previewTextItem = QGraphicsTextItem()
-        font = QFont("Verdana", 12, QFont.Weight.Normal)
+        font = QFont("Arial", 24, QFont.Weight.Bold)
         self._previewTextItem.setFont(font)
         self._previewTextItem.setDefaultTextColor(QColor(255, 255, 255))
         self._previewTextItem.setTextWidth(-1)  # no word-wrap; honour explicit newlines only
-        self._previewTextItem.setZValue(1)      # always above background
         self._previewScene.addItem(self._previewTextItem)
 
-        # ── ZMovie video player — placed in a QStackedWidget with graphicsView ──
-        # Find graphicsView's current position in its parent layout BEFORE moving it
-        _gvParent = self.ui.graphicsView.parentWidget()
-        _gvLayout = _gvParent.layout() if _gvParent else None
-        _gvIdx = _gvLayout.indexOf(self.ui.graphicsView) if _gvLayout else -1
-
+        # ── ZMovie video player (hidden by default) ─────────────────────────
         self._videoWidget = QVideoWidget()
-        self._videoWidget.setFixedSize(320, 240)
-
-        # Build a fixed-size stack: page 0 = graphics, page 1 = video
-        self._previewStack = QStackedWidget()
-        self._previewStack.setFixedSize(320, 240)
-        self._previewStack.addWidget(self.ui.graphicsView)  # index 0
-        self._previewStack.addWidget(self._videoWidget)     # index 1
-        self._previewStack.setCurrentIndex(0)
-
-        # Replace graphicsView's slot in the original layout with the stack, centred
-        if _gvLayout and _gvIdx >= 0:
-            _gvLayout.insertWidget(_gvIdx, self._previewStack, 0, Qt.AlignHCenter)
+        self._videoWidget.setVisible(False)
+        # Insert video widget into the same layout as graphicsView
+        parentLayout = self.ui.graphicsView.parentWidget().layout()
+        if parentLayout:
+            idx = parentLayout.indexOf(self.ui.graphicsView)
+            parentLayout.insertWidget(idx + 1, self._videoWidget)
 
         self._mediaPlayer = QMediaPlayer(self)
         self._audioOutput = QAudioOutput(self)
@@ -3244,7 +2684,7 @@ class MainWindow(QMainWindow):
             elapsed_ms = max(0, self._mediaPlayer.position())
             currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
         else:
-            elapsed_ms = max(0, self._pausedElapsed + self._elapsed.elapsed() - SUBTITLE_OFFSET_MS)
+            elapsed_ms = max(0, self._elapsed.elapsed() - SUBTITLE_OFFSET_MS)
             currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
         text = ""
 
@@ -3272,13 +2712,14 @@ class MainWindow(QMainWindow):
             self._positionPreviewText()
 
     def _positionPreviewText(self):
-        """Centre the text item horizontally within the scene, at fixed vertical position."""
-        sr = self._previewScene.sceneRect()
+        """Centre the text item horizontally and pin it near the bottom of the view."""
+        vw = self.ui.graphicsView.viewport().width()
+        vh = self.ui.graphicsView.viewport().height()
+        self._previewScene.setSceneRect(0, 0, vw, vh)
         br = self._previewTextItem.boundingRect()
-        x = max(0.0, (sr.width() - br.width()) / 2)
-        y = 130
+        x = max(0.0, (vw - br.width()) / 2)
+        y = max(0.0, vh - br.height() - 12)
         self._previewTextItem.setPos(x, y)
-
 
     def _stopPreview(self):
         """Stop the frame timer and clear the subtitle overlay."""
@@ -3897,7 +3338,7 @@ class MainWindow(QMainWindow):
         # ── Summary ──────────────────────────────────────────────────────
         lines = []
         for label, ok, detail in results:
-            status = "✓" if ok else "✘"
+            status = "OK" if ok else "FAILED"
             lines.append(f"[{status}] {label}: {detail}")
         summary = "\n\n".join(lines)
         hasErrors = not all(ok for _, ok, _ in results)
@@ -3960,7 +3401,6 @@ class MainWindow(QMainWindow):
 
     def _switchToDemoMode(self):
         self._editorMode = "demo"
-        self.ui.subsPreviewList.setRadioMode(False)
         self.actionDemoMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
@@ -3979,15 +3419,14 @@ class MainWindow(QMainWindow):
         self.ui.offsetListBox.blockSignals(True)
         self.ui.offsetListBox.clear()
         for name in sorted(merged.keys()):
-            self.ui.offsetListBox.addItem(name, userData=name,
-                                              modified=name in demoAlteredJson)
+            label = f"\u2022 {name}" if name in demoAlteredJson else name
+            self.ui.offsetListBox.addItem(label, userData=name)
         self.ui.offsetListBox.blockSignals(False)
         idx = self.ui.offsetListBox.findData(current)
         self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _switchToZmovieMode(self):
         self._editorMode = "zmovie"
-        self.ui.subsPreviewList.setRadioMode(False)
         self.actionZmovieMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
@@ -4006,15 +3445,14 @@ class MainWindow(QMainWindow):
         self.ui.offsetListBox.blockSignals(True)
         self.ui.offsetListBox.clear()
         for name in sorted(merged.keys()):
-            self.ui.offsetListBox.addItem(name, userData=name,
-                                             modified=name in zmovieAlteredJson)
+            label = f"\u2022 {name}" if name in zmovieAlteredJson else name
+            self.ui.offsetListBox.addItem(label, userData=name)
         self.ui.offsetListBox.blockSignals(False)
         idx = self.ui.offsetListBox.findData(current)
         self.ui.offsetListBox.setCurrentIndex(idx if idx >= 0 else 0)
 
     def _switchToVoxMode(self):
         self._editorMode = "vox"
-        self.ui.subsPreviewList.setRadioMode(False)
         self.actionVoxMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
@@ -4030,7 +3468,6 @@ class MainWindow(QMainWindow):
 
     def _switchToRadioMode(self):
         self._editorMode = "radio"
-        self.ui.subsPreviewList.setRadioMode(True)
         self.actionRadioMode.setChecked(True)
         self._syncTab()
         # Restore radio-specific widgets
@@ -4188,10 +3625,10 @@ class MainWindow(QMainWindow):
             self._switchToRadioMode()
 
         self.statusBar().showMessage(
-            f"Folder loaded — RADIO: {'✓' if radioPath else '✘'}  "
-            f"DEMO: {'✓' if demoPath else '✘'}  "
-            f"VOX: {'✓' if voxPath else '✘'}  "
-            f"ZMOVIE: {'✓' if zmoviePath else '✘'}",
+            f"Folder loaded — Radio: {'OK' if radioPath else 'missing'}  "
+            f"Demo: {'OK' if demoPath else 'missing'}  "
+            f"VOX: {'OK' if voxPath else 'missing'}  "
+            f"ZMovie: {'OK' if zmoviePath else 'missing'}",
             8000
         )
 
