@@ -5,7 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
-    QFrame, QComboBox)
+    QFrame, QComboBox, QSizePolicy)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
 from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -1300,8 +1300,8 @@ class MainWindow(QMainWindow):
 
         offsetRow = QHBoxLayout()
         self.ui.offsetListBox = OffsetListWidget(self)
-        self.ui.offsetListBox.setMaximumHeight(160)  # ~8 rows
         self.ui.offsetListBox.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.ui.offsetListBox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         offsetRow.addWidget(self.ui.offsetListBox, stretch=1)
 
         # Right side: freq filter, prev, next — stacked, vertically centered
