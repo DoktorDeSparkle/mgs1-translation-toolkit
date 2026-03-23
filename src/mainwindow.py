@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QListWidgetItem, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
-    QFrame, QComboBox, QSizePolicy)
+    QFrame, QComboBox, QSizePolicy, QScrollArea, QTabWidget,
+    QDialogButtonBox, QWidget)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
 from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -65,6 +66,88 @@ def _mergedZmovieJson() -> dict:
     merged = dict(zmovieOriginalJson)
     merged.update(zmovieAlteredJson)
     return merged
+
+# Radio iseeva JSON state (calls-only for now)
+# Structure: {callOffset: {voxOffset: {subtitleOffset: "text", ...}, ...}, ...}
+radioOriginalJson: dict = {}   # read-only
+radioAlteredJson:  dict = {}   # sparse — only user-modified subtitle entries
+
+def _mergedRadioCallsJson() -> dict:
+    """Return radioOriginalJson with radioAlteredJson overlaid (3-level: call->vox->sub).
+    Skips underscore-prefixed keys (static field storage like _prompts, _saves, _freqAdd)."""
+    merged = {}
+    allKeys = set(radioOriginalJson) | set(radioAlteredJson)
+    for callOff in allKeys:
+        if callOff.startswith("_"):
+            continue
+        origCall = radioOriginalJson.get(callOff, {})
+        altCall  = radioAlteredJson.get(callOff, {})
+        mergedCall = {}
+        for voxOff in set(origCall) | set(altCall):
+            origVox = origCall.get(voxOff, {})
+            altVox  = altCall.get(voxOff, {})
+            mergedCall[voxOff] = {**origVox, **altVox}
+        merged[callOff] = mergedCall
+    return merged
+
+def _getRadioVoxSubs(callOffset: str, voxOffset: str) -> dict:
+    """Get merged subtitles for a specific call + vox combination."""
+    merged = _mergedRadioCallsJson()
+    return merged.get(callOffset, {}).get(voxOffset, {})
+
+def _extractIseevaCallsFromXml(xmlRoot) -> dict:
+    """Extract calls-only iseeva JSON from the in-memory XML tree.
+    Structure: {callOffset: {voxOffset: {subtitleOffset: text}}}
+    For calls with no VOX_CUES, the voxOffset key is the call offset itself."""
+    calls = {}
+    for call in xmlRoot.findall(".//Call"):
+        callOffset = call.get("offset")
+        callData = {}
+        for vox in call.findall(".//VOX_CUES"):
+            voxOffset = vox.get("offset")
+            voxText = {}
+            for sub in vox.findall("SUBTITLE"):
+                voxText[sub.get("offset")] = sub.get("text", "")
+            if voxText:
+                callData[voxOffset] = voxText
+        # Calls with direct SUBTITLEs (no VOX_CUES) — use call offset as vox key
+        directSubs = {}
+        for sub in call.findall("SUBTITLE"):
+            directSubs[sub.get("offset")] = sub.get("text", "")
+        if directSubs:
+            callData[callOffset] = directSubs
+        if callData:
+            calls[callOffset] = callData
+    return calls
+
+def _extractStaticFieldsFromXml(xmlRoot) -> dict:
+    """Extract static radio fields (prompts, save locations, contact names) from XML.
+    Returns {"prompts": {idx: text}, "saves": {idx: contentB}, "freqAdd": {offset: name}}."""
+    prompts = {}
+    saves = {}
+    freqAdd = {}
+
+    # Prompts: first ASK_USER → iterate USR_OPTN children
+    firstAsk = xmlRoot.find(".//ASK_USER")
+    if firstAsk is not None:
+        for i, option in enumerate(firstAsk):
+            prompts[str(i)] = option.get("text", "")
+
+    # Save locations: first MEM_SAVE → iterate SAVE_OPT children
+    firstSave = xmlRoot.find(".//MEM_SAVE")
+    if firstSave is not None:
+        for i, option in enumerate(firstSave):
+            saves[str(i)] = option.get("contentB", "")
+
+    # Contact names: all ADD_FREQ elements
+    for elem in xmlRoot.findall(".//ADD_FREQ"):
+        offset = elem.get("offset")
+        name = elem.get("name", "")
+        if offset:
+            freqAdd[offset] = name
+
+    return {"prompts": prompts, "saves": saves, "freqAdd": freqAdd}
+
 
 def _ensureJsonV2(data: dict) -> dict:
     """Auto-convert v1 demo/vox JSON to v2 if needed.
@@ -332,6 +415,124 @@ class XmlFileDialog(QFileDialog):
         self.setDirectory(os.getcwd())
 
 
+class RadioStaticFieldsDialog(QDialog):
+    """Dialog for editing radio static fields: prompts, save locations, contact names."""
+
+    def __init__(self, xmlRoot, existingEdits, initialTab=0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Radio Static Fields")
+        self.setMinimumSize(500, 400)
+        self.result_data = {}
+
+        originals = _extractStaticFieldsFromXml(xmlRoot)
+
+        layout = QVBoxLayout(self)
+        tabs = QTabWidget()
+        layout.addWidget(tabs)
+
+        # ── Tab 0: Prompts ──────────────────────────────────────────────
+        self._promptEdits = {}
+        promptWidget = QWidget()
+        promptLayout = QFormLayout(promptWidget)
+        editPrompts = existingEdits.get("_prompts", {})
+        for idx in sorted(originals["prompts"].keys(), key=int):
+            origText = originals["prompts"][idx]
+            edit = QLineEdit()
+            edit.setPlaceholderText(origText)
+            if idx in editPrompts:
+                edit.setText(editPrompts[idx])
+            self._promptEdits[idx] = edit
+            promptLayout.addRow(QLabel(origText), edit)
+        promptScroll = QScrollArea()
+        promptScroll.setWidgetResizable(True)
+        promptScroll.setWidget(promptWidget)
+        tabs.addTab(promptScroll, "Prompts")
+
+        # ── Tab 1: Save Locations ───────────────────────────────────────
+        self._saveEdits = {}
+        saveWidget = QWidget()
+        saveLayout = QFormLayout(saveWidget)
+        editSaves = existingEdits.get("_saves", {})
+        for idx in sorted(originals["saves"].keys(), key=int):
+            origText = originals["saves"][idx]
+            edit = QLineEdit()
+            edit.setMinimumWidth(300)
+            edit.setPlaceholderText(origText)
+            if idx in editSaves:
+                edit.setText(editSaves[idx])
+            self._saveEdits[idx] = edit
+            saveLayout.addRow(QLabel(origText), edit)
+        saveScroll = QScrollArea()
+        saveScroll.setWidgetResizable(True)
+        saveScroll.setWidget(saveWidget)
+        tabs.addTab(saveScroll, "Save Locations")
+
+        # ── Tab 2: Contact Names ────────────────────────────────────────
+        # Group by unique name so user edits one row per unique contact
+        self._freqEdits = {}       # {uniqueName: QLineEdit}
+        self._freqNameOffsets = {}  # {uniqueName: [offset, ...]}
+        editFreq = existingEdits.get("_freqAdd", {})
+        nameToOffsets = {}
+        for offset, name in originals["freqAdd"].items():
+            nameToOffsets.setdefault(name, []).append(offset)
+
+        freqWidget = QWidget()
+        freqLayout = QFormLayout(freqWidget)
+        for name in sorted(nameToOffsets.keys()):
+            offsets = nameToOffsets[name]
+            self._freqNameOffsets[name] = offsets
+            edit = QLineEdit()
+            edit.setPlaceholderText(name)
+            # Pre-fill from existing edits (check first offset for this name)
+            existing = editFreq.get(offsets[0])
+            if existing:
+                edit.setText(existing)
+            self._freqEdits[name] = edit
+            countLabel = f" ({len(offsets)}x)" if len(offsets) > 1 else ""
+            freqLayout.addRow(QLabel(f"{name}{countLabel}"), edit)
+        freqScroll = QScrollArea()
+        freqScroll.setWidgetResizable(True)
+        freqScroll.setWidget(freqWidget)
+        tabs.addTab(freqScroll, "Contact Names")
+
+        tabs.setCurrentIndex(initialTab)
+
+        # ── OK / Cancel ─────────────────────────────────────────────────
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._collectAndAccept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _collectAndAccept(self):
+        """Collect edited values into self.result_data and accept."""
+        # Prompts: only include if text differs from placeholder (original)
+        prompts = {}
+        for idx, edit in self._promptEdits.items():
+            text = edit.text().strip()
+            if text and text != edit.placeholderText():
+                prompts[idx] = text
+        # Save locations
+        saves = {}
+        for idx, edit in self._saveEdits.items():
+            text = edit.text().strip()
+            if text and text != edit.placeholderText():
+                saves[idx] = text
+        # Contact names: expand back to per-offset dict
+        freqAdd = {}
+        for name, edit in self._freqEdits.items():
+            text = edit.text().strip()
+            if text and text != edit.placeholderText():
+                for offset in self._freqNameOffsets[name]:
+                    freqAdd[offset] = text
+
+        self.result_data = {
+            "_prompts": prompts,
+            "_saves": saves,
+            "_freqAdd": freqAdd,
+        }
+        self.accept()
+
+
 class NotificationDialog(QDialog):
     def __init__(self, title="Notification", message="", parent=None):
         super().__init__(parent)
@@ -534,10 +735,6 @@ class FinalizeProjectDialog(QDialog):
         self.radioGroup.setChecked(True)
         radioLayout = QFormLayout()
 
-        self.chkPrepare = QCheckBox("Prepare lengths (-p)")
-        self.chkPrepare.setChecked(True)
-        radioLayout.addRow(self.chkPrepare)
-
         self.chkOrigHex = QCheckBox("Use original hex (-x)")
         radioLayout.addRow(self.chkOrigHex)
 
@@ -546,6 +743,9 @@ class FinalizeProjectDialog(QDialog):
 
         self.chkIntegral = QCheckBox("Integral disc (--integral)")
         radioLayout.addRow(self.chkIntegral)
+
+        self.chkLong = QCheckBox("Long call headers (--long)")
+        radioLayout.addRow(self.chkLong)
 
         self.chkDebug = QCheckBox("Debug output (-v)")
         radioLayout.addRow(self.chkDebug)
@@ -566,23 +766,7 @@ class FinalizeProjectDialog(QDialog):
         self.btnBrowseStage = QPushButton("Browse...")
         self.btnBrowseStage.clicked.connect(self._browseStageDir)
         stageDirRow.addWidget(self.btnBrowseStage)
-        stageLayout.addRow("STAGE.DIR path:", stageDirRow)
-
-        self.chkStageReplace = QCheckBox("Replace original STAGE.DIR")
-        self.chkStageReplace.setChecked(True)
-        self.chkStageReplace.toggled.connect(self._updateStageOutEnabled)
-        stageLayout.addRow(self.chkStageReplace)
-
-        stageOutRow = QHBoxLayout()
-        self.txtStageOut = QLineEdit()
-        self.txtStageOut.setPlaceholderText("Output path for STAGE.DIR")
-        self.txtStageOut.setEnabled(False)
-        stageOutRow.addWidget(self.txtStageOut)
-        self.btnBrowseStageOut = QPushButton("Browse...")
-        self.btnBrowseStageOut.setEnabled(False)
-        self.btnBrowseStageOut.clicked.connect(self._browseStageOut)
-        stageOutRow.addWidget(self.btnBrowseStageOut)
-        stageLayout.addRow("Output path:", stageOutRow)
+        stageLayout.addRow("Input STAGE.DIR:", stageDirRow)
 
         self.stageGroup.setLayout(stageLayout)
         layout.addWidget(self.stageGroup)
@@ -664,27 +848,6 @@ class FinalizeProjectDialog(QDialog):
                 "if any VOX or RADIO offsets have changed.\n\n"
                 "Only uncheck this if you know offsets are unchanged.")
 
-    def _updateStageOutEnabled(self, checked):
-        self.txtStageOut.setEnabled(not checked)
-        self.btnBrowseStageOut.setEnabled(not checked)
-        if not checked and not self.txtStageOut.text().strip():
-            # Auto-populate from output folder or alongside original
-            outDir = self.txtOutputDir.text().strip() if hasattr(self, 'txtOutputDir') else ""
-            stageName = os.path.basename(self.txtStageDir.text().strip()) or "STAGE.DIR"
-            if outDir:
-                self.txtStageOut.setText(os.path.join(outDir, stageName))
-            elif self.txtStageDir.text().strip():
-                self.txtStageOut.setText(os.path.join(
-                    os.path.dirname(self.txtStageDir.text().strip()), "STAGE-NEW.DIR"))
-
-    def _browseStageOut(self):
-        path = QFileDialog.getSaveFileName(
-            self, "Save STAGE.DIR As", self.txtStageOut.text() or self.txtStageDir.text(),
-            "DIR Files (*.DIR *.dir);;All Files (*)"
-        )[0]
-        if path:
-            self.txtStageOut.setText(path)
-
     def _browseOutputDir(self):
         path = QFileDialog.getExistingDirectory(
             self, "Select Output Folder", self.txtOutputDir.text())
@@ -711,8 +874,6 @@ class FinalizeProjectDialog(QDialog):
     @property
     def zmovieEnabled(self): return self.zmovieGroup.isChecked()
     @property
-    def prepare(self): return self.chkPrepare.isChecked()
-    @property
     def useOrigHex(self): return self.chkOrigHex.isChecked()
     @property
     def doubleWidth(self): return self.chkDoubleWidth.isChecked()
@@ -721,9 +882,9 @@ class FinalizeProjectDialog(QDialog):
     @property
     def integral(self): return self.chkIntegral.isChecked()
     @property
-    def stageDirPath(self): return self.txtStageDir.text().strip()
+    def longHeaders(self): return self.chkLong.isChecked()
     @property
-    def stageOutName(self): return self.txtStageOut.text().strip()
+    def stageDirPath(self): return self.txtStageDir.text().strip()
     @property
     def replaceOriginals(self): return self.chkReplace.isChecked()
     @property
@@ -1425,6 +1586,28 @@ class MainWindow(QMainWindow):
         separatorLine.setFrameShadow(QFrame.Sunken)
         self.ui.verticalLayout_4.insertWidget(quitIdx + 3, separatorLine)
 
+        # ── Radio static fields buttons (radio-mode only) ────────────────────
+        self.btnEditPrompts = QPushButton("Edit Prompts...")
+        self.btnEditPrompts.setToolTip("Edit save prompts (ASK_USER)")
+        self.btnEditPrompts.setEnabled(False)
+        self.btnEditPrompts.setVisible(False)
+        self.btnEditPrompts.clicked.connect(lambda: self._openStaticFieldsDialog(0))
+        self.ui.verticalLayout_4.insertWidget(quitIdx + 4, self.btnEditPrompts)
+
+        self.btnEditSaveLocations = QPushButton("Edit Save Locations...")
+        self.btnEditSaveLocations.setToolTip("Edit save location names (MEM_SAVE)")
+        self.btnEditSaveLocations.setEnabled(False)
+        self.btnEditSaveLocations.setVisible(False)
+        self.btnEditSaveLocations.clicked.connect(lambda: self._openStaticFieldsDialog(1))
+        self.ui.verticalLayout_4.insertWidget(quitIdx + 5, self.btnEditSaveLocations)
+
+        self.btnEditContactNames = QPushButton("Edit Contact Names...")
+        self.btnEditContactNames.setToolTip("Edit codec contact names (ADD_FREQ)")
+        self.btnEditContactNames.setEnabled(False)
+        self.btnEditContactNames.setVisible(False)
+        self.btnEditContactNames.clicked.connect(lambda: self._openStaticFieldsDialog(2))
+        self.ui.verticalLayout_4.insertWidget(quitIdx + 6, self.btnEditContactNames)
+
         # ── View menu (4 mutually exclusive mode actions) ─────────────────────
         from PySide6.QtGui import QActionGroup
         viewMenu = self.menuBar().addMenu("View")
@@ -1664,7 +1847,8 @@ class MainWindow(QMainWindow):
                 continue
             if filterFreq and call.get("freq") != filterFreq:
                 continue
-            self.ui.offsetListBox.addItem(offset, userData=offset)
+            label = f"\u2022 {offset}" if offset in radioAlteredJson else offset
+            self.ui.offsetListBox.addItem(label, userData=offset)
         self.ui.offsetListBox.blockSignals(False)
         # Restore selection if still present, else select first
         idx = self.ui.offsetListBox.findData(current)
@@ -1845,6 +2029,7 @@ class MainWindow(QMainWindow):
         self.ui.FreqDisplay.display(radioManager.workingCall.get("freq"))
         self.ui.VoxAddressDisplay.setText("")
         self.ui.VoxBlockAddressDisplay.setText("")
+        self.revertVoxButton.setVisible(offset in radioAlteredJson)
 
         self.ui.audioCueListView.clear()
         for i, audio in enumerate(radioManager.getVoxOffsets()):
@@ -1858,8 +2043,12 @@ class MainWindow(QMainWindow):
         else:
             # No VOX_CUES (e.g. staff calls): load SUBTITLE elements directly from the call
             self.ui.subsPreviewList.clear()
+            callOffset = radioManager.workingCall.get("offset")
+            # For direct subs, vox key = call offset
+            voxSubs = _getRadioVoxSubs(callOffset, callOffset)
             for i, sub in enumerate(radioManager.workingCall.findall("SUBTITLE")):
-                text = sub.get("text", "")
+                subOffset = sub.get("offset")
+                text = voxSubs.get(subOffset, sub.get("text", ""))
                 QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
@@ -1947,7 +2136,12 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setText("0x" + voxOffsetHex)
 
         self.ui.subsPreviewList.clear()
-        for i, text in enumerate(radioManager.getSubs()):
+        callOffset = radioManager.workingCall.get("offset")
+        voxOffset = radioManager.workingVox.get("offset")
+        voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+        for i, sub in enumerate(radioManager.workingVox.findall("SUBTITLE")):
+            subOffset = sub.get("offset")
+            text = voxSubs.get(subOffset, sub.get("text", ""))
             QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
 
         self._clearEditor()
@@ -1980,11 +2174,16 @@ class MainWindow(QMainWindow):
                 self.ui.startFrameBox.setValue(0)
                 self.ui.durationBox.setValue(0)
         else:
-            # Populate text editor
-            subs = radioManager.getSubs()
-            if idx >= len(subs):
+            # Populate text editor from iseeva JSON
+            subElems = self._radioSubtitleElems()
+            if idx >= len(subElems):
                 return
-            text = subs[idx].replace("\\r\\n", "\n")
+            subOffset = subElems[idx].get("offset")
+            callOffset = radioManager.workingCall.get("offset")
+            voxOffset = self._radioVoxKey()
+            voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+            text = voxSubs.get(subOffset, subElems[idx].get("text", ""))
+            text = text.replace("\\r\\n", "\n")
             self.ui.DialogueEditorBox.setText(text)
 
             # Populate timing from VOX if loaded
@@ -2092,9 +2291,21 @@ class MainWindow(QMainWindow):
             self.ui.subsPreviewList.setCurrentRow(nextRow)
             return
 
-        # --- Text → XML -------------------------------------------------------
+        # --- Text → iseeva JSON (copy-on-write) --------------------------------
         newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "\\r\\n")
-        radioManager.updateSubText(savedIdx, newText)
+        callOffset = radioManager.workingCall.get("offset")
+        voxOffset = self._radioVoxKey()
+        subElems = self._radioSubtitleElems()
+        if savedIdx < len(subElems):
+            subOffset = subElems[savedIdx].get("offset")
+            if callOffset not in radioAlteredJson:
+                radioAlteredJson[callOffset] = {}
+            if voxOffset not in radioAlteredJson[callOffset]:
+                radioAlteredJson[callOffset][voxOffset] = {}
+            radioAlteredJson[callOffset][voxOffset][subOffset] = newText
+
+        # --- Sync text to VOX altered JSON --------------------------------------
+        self._syncRadioEditToVox(savedIdx, newText)
 
         # --- Timing + text → VOX demo -----------------------------------------
         lines = self._getVoxSubtitleLines()
@@ -2106,6 +2317,8 @@ class MainWindow(QMainWindow):
         # Refresh subtitle list to show new text
         self._modified = True
         self._refreshSubsList()
+        self._populateRadioOffsets()
+        self.revertVoxButton.setVisible(callOffset in radioAlteredJson)
         self.applyEditButton.setStyleSheet("")
         if projectFilePath:
             self.statusBar().showMessage("Changes applied (unsaved — use File → Save Project)", 5000)
@@ -2259,13 +2472,36 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Subtitle split", 3000)
             return
 
-        # ── Radio mode ────────────────────────────────────────────────────
-        text = radioManager.getSubs()[currentSubIndex]
+        # ── Radio mode — split via iseeva JSON + XML ─────────────────────
+        subElems = self._radioSubtitleElems()
+        if currentSubIndex >= len(subElems):
+            return
+        origElem = subElems[currentSubIndex]
+        origSubOffset = origElem.get("offset")
+        callOffset = radioManager.workingCall.get("offset")
+        voxOffset = self._radioVoxKey()
 
-        # Duplicate text into both entries
-        radioManager.addSubtitle(currentSubIndex, text, after=True)
+        # Get text from merged JSON
+        voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+        text = voxSubs.get(origSubOffset, origElem.get("text", ""))
 
-        # Split VOX timing if loaded
+        # Add new subtitle to XML with offset = original + 1
+        newSub = radioManager.addSubtitle(currentSubIndex, text, after=True)
+        newSubOffset = str(int(origSubOffset) + 1)
+        newSub.set("offset", newSubOffset)
+
+        # Write both entries to altered JSON
+        if callOffset not in radioAlteredJson:
+            radioAlteredJson[callOffset] = {}
+        if voxOffset not in radioAlteredJson[callOffset]:
+            radioAlteredJson[callOffset][voxOffset] = {}
+        radioAlteredJson[callOffset][voxOffset][origSubOffset] = text
+        radioAlteredJson[callOffset][voxOffset][newSubOffset] = text
+
+        # Sync split to VOX altered JSON
+        self._syncRadioSplitToVox(currentSubIndex, text)
+
+        # Split VOX timing if loaded (in-memory demo object for audio sync)
         lines = self._getVoxSubtitleLines()
         if lines and currentSubIndex < len(lines):
             orig_line = lines[currentSubIndex]
@@ -2282,6 +2518,8 @@ class MainWindow(QMainWindow):
 
         self._modified = True
         self._refreshSubsList()
+        self._populateRadioOffsets()
+        self.revertVoxButton.setVisible(callOffset in radioAlteredJson)
         self.ui.subsPreviewList.setCurrentRow(currentSubIndex)
         self.statusBar().showMessage("Subtitle split", 3000)
 
@@ -2299,6 +2537,13 @@ class MainWindow(QMainWindow):
             key, altDict, refreshFn, selectFn = (
                 currentZmovieKey, zmovieAlteredJson,
                 self._populateZmovieOffsets, self._selectZmovie)
+        elif self._editorMode == "radio":
+            callOff = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
+            if not callOff:
+                return
+            key, altDict, refreshFn, selectFn = (
+                callOff, radioAlteredJson,
+                self._populateRadioOffsets, self._selectRadioCall)
         else:
             return
         if not key or key not in altDict:
@@ -2370,6 +2615,80 @@ class MainWindow(QMainWindow):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
+    def _radioSubtitleElems(self) -> list:
+        """Return the SUBTITLE XML elements for the current radio selection.
+        If a VOX cue is selected, returns its SUBTITLEs; otherwise the call's direct SUBTITLEs."""
+        if radioManager.workingVox is not None:
+            return radioManager.workingVox.findall("SUBTITLE")
+        elif radioManager.workingCall is not None:
+            return radioManager.workingCall.findall("SUBTITLE")
+        return []
+
+    def _radioVoxKey(self) -> str:
+        """Return the vox offset key for the current radio selection.
+        For VOX_CUES, returns the vox offset; for direct subs, returns the call offset."""
+        if radioManager.workingVox is not None:
+            return radioManager.workingVox.get("offset")
+        elif radioManager.workingCall is not None:
+            return radioManager.workingCall.get("offset")
+        return ""
+
+    def _voxKeyForCurrentRadioCue(self) -> str:
+        """Return the vox sequential key (e.g. 'vox-0035') that corresponds to
+        the current radio VOX_CUES byte address, or '' if not found."""
+        if not currentVoxOffset or not voxSeqToOffset:
+            return ""
+        for name, off in voxSeqToOffset.items():
+            if off == currentVoxOffset:
+                return name
+        return ""
+
+    def _syncRadioEditToVox(self, subIdx: int, newText: str):
+        """Propagate a radio subtitle text edit to the matching voxAlteredJson entry."""
+        voxKey = self._voxKeyForCurrentRadioCue()
+        if not voxKey:
+            return
+        # Copy-on-write: deep-copy original into altered if not yet present
+        if voxKey not in voxAlteredJson:
+            orig = voxOriginalJson.get(voxKey, {})
+            if not orig:
+                return
+            voxAlteredJson[voxKey] = json.loads(json.dumps(orig))
+        subtitles = voxAlteredJson[voxKey]
+        sortedFrames = sorted(subtitles.keys(), key=int)
+        if subIdx < len(sortedFrames):
+            frame = sortedFrames[subIdx]
+            subtitles[frame]["text"] = newText.replace("\\r\\n", "｜")
+
+    def _syncRadioSplitToVox(self, subIdx: int, text: str):
+        """Propagate a radio subtitle split to the matching voxAlteredJson entry.
+        Splits the VOX subtitle at subIdx into two with halved durations."""
+        voxKey = self._voxKeyForCurrentRadioCue()
+        if not voxKey:
+            return
+        if voxKey not in voxAlteredJson:
+            orig = voxOriginalJson.get(voxKey, {})
+            if not orig:
+                return
+            voxAlteredJson[voxKey] = json.loads(json.dumps(orig))
+        subtitles = voxAlteredJson[voxKey]
+        sortedFrames = sorted(subtitles.keys(), key=int)
+        if subIdx >= len(sortedFrames):
+            return
+        frame = sortedFrames[subIdx]
+        sub = subtitles[frame]
+        origStart = int(frame)
+        origDur = int(sub.get("duration", "0"))
+        origEnd = origStart + origDur
+        gap = self._SPLIT_GAP_FRAMES
+
+        halfDur = origDur // 2
+        secondStart = origStart + halfDur + gap
+        secondDur = max(1, origEnd - secondStart)
+
+        subtitles[frame] = {"duration": str(halfDur), "text": text.replace("\\r\\n", "｜")}
+        subtitles[str(secondStart)] = {"duration": str(secondDur), "text": text.replace("\\r\\n", "｜")}
+
     def _refreshSubsList(self):
         """Rebuild the subtitle list widget from the current data source."""
         self.ui.subsPreviewList.clear()
@@ -2381,7 +2700,12 @@ class MainWindow(QMainWindow):
                 text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
                 QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
         else:
-            for i, text in enumerate(radioManager.getSubs()):
+            callOffset = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
+            voxOffset = self._radioVoxKey() if callOffset else None
+            voxSubs = _getRadioVoxSubs(callOffset, voxOffset) if callOffset and voxOffset else {}
+            for i, sub in enumerate(self._radioSubtitleElems()):
+                subOffset = sub.get("offset")
+                text = voxSubs.get(subOffset, sub.get("text", ""))
                 QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
 
     def _idxPrefix(self, i: int) -> str:
@@ -3111,7 +3435,10 @@ class MainWindow(QMainWindow):
             # ══════════════════════════════════════════════════════════════
 
             # ── 1. VOX compile ───────────────────────────────────────────
-            if dlg.voxEnabled:
+            doVox = dlg.voxEnabled and bool(voxAlteredJson)
+            if dlg.voxEnabled and not doVox:
+                results.append(("VOX", True, "No changes — skipped"))
+            if doVox:
                 progress.setStep("Compiling VOX.DAT...")
                 try:
                     self._syncJsonToManager(voxAlteredJson, voxSeqToOffset, voxManager)
@@ -3150,7 +3477,7 @@ class MainWindow(QMainWindow):
             # ── 2. VOX offset adjust (STAGE.DIR + RADIO XML) ────────────
             #    Compute new offsets from the compiled VOX.DAT and patch
             #    STAGE.DIR Pv tags + RADIO XML voxCode attributes.
-            if dlg.voxEnabled and voxOffsetsJson:
+            if doVox and voxOffsetsJson:
                 progress.setStep("Adjusting VOX offsets in STAGE.DIR + RADIO XML...")
                 try:
                     from scripts.StageDirTools.voxOffsetAdjuster import (
@@ -3192,7 +3519,10 @@ class MainWindow(QMainWindow):
                     results.append(("VOX Offsets", False, str(e)))
 
             # ── 3. DEMO compile ──────────────────────────────────────────
-            if dlg.demoEnabled:
+            doDemo = dlg.demoEnabled and bool(demoAlteredJson)
+            if dlg.demoEnabled and not doDemo:
+                results.append(("DEMO", True, "No changes — skipped"))
+            if doDemo:
                 progress.setStep("Compiling DEMO.DAT...")
                 try:
                     self._syncJsonToDemoManager()
@@ -3229,7 +3559,7 @@ class MainWindow(QMainWindow):
 
             # ── 3b. DEMO offset adjust (STAGE.DIR) ──────────────────────
             #    Same pattern as VOX: compute new offsets, patch Ps/Pp tags
-            if dlg.demoEnabled and demoOffsetsJson and stageWorkingPath:
+            if doDemo and demoOffsetsJson and stageWorkingPath:
                 progress.setStep("Adjusting DEMO offsets in STAGE.DIR...")
                 try:
                     import struct as _struct
@@ -3287,8 +3617,65 @@ class MainWindow(QMainWindow):
                     RDR.useDWidSaveB = False
                     RDR.newOffsets = {}
 
+                    # Inject altered iseeva JSON into XML before compilation
+                    import copy
+                    import xml.etree.ElementTree as _ET
+                    xmlCopy = copy.deepcopy(radioManager.radioXMLData)
+                    if radioAlteredJson:
+                        for call in xmlCopy.findall(".//Call"):
+                            callOff = call.get("offset")
+                            altCall = radioAlteredJson.get(callOff)
+                            if not altCall:
+                                continue
+                            call.set("modified", "True")
+                            # 3-level: altCall is {voxOffset: {subOffset: text}}
+                            def _injectIntoContainer(container, altSubs):
+                                """Inject altered subs into a VOX_CUES or Call element.
+                                Updates existing SUBTITLEs and creates missing ones."""
+                                existingOffsets = set()
+                                lastSub = None
+                                for sub in container.findall("SUBTITLE"):
+                                    existingOffsets.add(sub.get("offset"))
+                                    newText = altSubs.get(sub.get("offset"))
+                                    if newText is not None:
+                                        sub.set("text", newText)
+                                    lastSub = sub
+                                # Create missing subtitles (e.g. from splits)
+                                for subOff, text in altSubs.items():
+                                    if subOff not in existingOffsets:
+                                        attrs = {
+                                            "offset": subOff, "length": "0",
+                                            "face": lastSub.get("face", "95f2") if lastSub is not None else "95f2",
+                                            "anim": lastSub.get("anim", "39c3") if lastSub is not None else "39c3",
+                                            "unk3": lastSub.get("unk3", "0000") if lastSub is not None else "0000",
+                                            "text": text, "textHex": "", "lengthLost": "0",
+                                        }
+                                        newElem = _ET.SubElement(container, "SUBTITLE", attrs)
+                                        print(f"[finalize] Created missing SUBTITLE offset={subOff} in container offset={container.get('offset')}")
+
+                            for vox in call.findall(".//VOX_CUES"):
+                                altVox = altCall.get(vox.get("offset"), {})
+                                if altVox:
+                                    _injectIntoContainer(vox, altVox)
+                            # Direct subs (no VOX_CUES) — keyed by call offset
+                            altDirect = altCall.get(callOff, {})
+                            if altDirect:
+                                _injectIntoContainer(call, altDirect)
+                    # Inject static fields (prompts, saves, contact names)
+                    import scripts.xmlModifierTools as XMT
+                    XMT.root = xmlCopy
+                    if radioAlteredJson.get("_prompts"):
+                        XMT.injectUserPrompts({"prompts": {"0": radioAlteredJson["_prompts"]}})
+                    if radioAlteredJson.get("_saves"):
+                        XMT.injectSaveBlocks({"saves": {"0": radioAlteredJson["_saves"]}})
+                    if radioAlteredJson.get("_freqAdd"):
+                        XMT.injectCallNames({"freqAdd": radioAlteredJson["_freqAdd"]})
+
                     tmpXmlPath = os.path.join(tmpDir, "radio-finalize.xml")
-                    radioManager.saveXML(tmpXmlPath)
+                    from xml.dom.minidom import parseString as _parseString
+                    xmlStr = _parseString(_ET.tostring(xmlCopy)).toprettyxml(indent="  ")
+                    with open(tmpXmlPath, 'w', encoding='utf-8') as _xf:
+                        _xf.write(xmlStr)
 
                     radioDatPath = projectSettings.get("radio_dat_path", "")
                     radioOut = _outPath(radioDatPath, "RADIO-NEW.DAT")
@@ -3296,20 +3683,17 @@ class MainWindow(QMainWindow):
                     # STAGE.DIR: RDR reads from stageWorkingPath (may be VOX/DEMO-patched temp)
                     # and writes its own radio offset patches to the final output
                     if stageWorkingPath:
-                        if dlg.chkStageReplace.isChecked():
-                            stageOut = _outPath(stagePath, os.path.basename(stagePath))
-                        else:
-                            stageOut = dlg.stageOutName or _outPath(stagePath, "STAGE-NEW.DIR")
+                        stageOut = _outPath(stagePath, os.path.basename(stagePath) if stagePath else "STAGE.DIR")
                     else:
                         stageOut = None
 
                     args = Namespace(
                         input=tmpXmlPath, output=radioOut,
                         stage=stageWorkingPath, stageOut=stageOut,
-                        prepare=dlg.prepare, hex=dlg.useOrigHex,
+                        prepare=False, hex=dlg.useOrigHex,
                         debug=dlg.debugOutput, double=dlg.doubleWidth,
                         integral=dlg.integral,
-                        long=True, pad=False, roundtrip=False,
+                        long=dlg.longHeaders, pad=False, roundtrip=False,
                     )
                     RDR.main(args)
                     detail = f"RADIO.DAT → {radioOut}"
@@ -3320,7 +3704,9 @@ class MainWindow(QMainWindow):
                     results.append(("RADIO", False, str(e)))
 
             # ── 5. ZMOVIE compile ────────────────────────────────────────
-            if dlg.zmovieEnabled:
+            if dlg.zmovieEnabled and not zmovieAlteredJson:
+                results.append(("ZMOVIE", True, "No changes — skipped"))
+            if dlg.zmovieEnabled and zmovieAlteredJson:
                 progress.setStep("Compiling ZMOVIE.STR...")
                 try:
                     from zmovieTools.extractZmovie import compileToFile as zmCompile
@@ -3398,6 +3784,11 @@ class MainWindow(QMainWindow):
         self.freqFilterLabel.setVisible(False)
         self.freqFilterCombo.setVisible(False)
         self.revertVoxButton.setVisible(False)
+        self.ui.startFrameBox.setEnabled(True)
+        self.ui.durationBox.setEnabled(True)
+        self.btnEditPrompts.setVisible(False)
+        self.btnEditSaveLocations.setVisible(False)
+        self.btnEditContactNames.setVisible(False)
 
     def _switchToDemoMode(self):
         self._editorMode = "demo"
@@ -3482,8 +3873,17 @@ class MainWindow(QMainWindow):
         self.chkUnclaimedVox.setVisible(False)
         self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
         self.revertVoxButton.setVisible(False)
+        self.ui.startFrameBox.setEnabled(False)
+        self.ui.durationBox.setEnabled(False)
         self.freqFilterLabel.setVisible(True)
         self.freqFilterCombo.setVisible(True)
+        hasXml = radioManager.radioXMLData is not None
+        self.btnEditPrompts.setVisible(True)
+        self.btnEditPrompts.setEnabled(hasXml)
+        self.btnEditSaveLocations.setVisible(True)
+        self.btnEditSaveLocations.setEnabled(hasXml)
+        self.btnEditContactNames.setVisible(True)
+        self.btnEditContactNames.setEnabled(hasXml)
         self._refreshFreqFilter()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
@@ -3497,6 +3897,24 @@ class MainWindow(QMainWindow):
             self.ui.audioCueListView.setCurrentRow(0)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
+
+    def _openStaticFieldsDialog(self, initialTab=0):
+        """Open the radio static fields editor dialog."""
+        existingEdits = {
+            "_prompts": radioAlteredJson.get("_prompts", {}),
+            "_saves":   radioAlteredJson.get("_saves", {}),
+            "_freqAdd": radioAlteredJson.get("_freqAdd", {}),
+        }
+        dlg = RadioStaticFieldsDialog(
+            radioManager.radioXMLData, existingEdits,
+            initialTab=initialTab, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            for key in ("_prompts", "_saves", "_freqAdd"):
+                if dlg.result_data.get(key):
+                    radioAlteredJson[key] = dlg.result_data[key]
+                elif key in radioAlteredJson:
+                    del radioAlteredJson[key]
+            self._modified = True
 
     def _getDemoSubtitleLines(self) -> list:
         """Return a flat list of dialogueLine objects from the currently selected demo entry.
@@ -3645,6 +4063,8 @@ class MainWindow(QMainWindow):
         RDT.fileSize = 0
         RDT.offset = 0
         RDT.callDict = {}
+        RDT.callOffsetToNext = {}
+        RDT.customGraphicsData = []
 
         tmpDir = tempfile.mkdtemp()
         tmpBase = os.path.join(tmpDir, "radio_parse")
@@ -3660,6 +4080,9 @@ class MainWindow(QMainWindow):
                 xf.write(xmlStr)
 
             radioManager.loadRadioXmlFile(xmlPath)
+            global radioOriginalJson, radioAlteredJson
+            radioOriginalJson = _extractIseevaCallsFromXml(radioManager.radioXMLData)
+            radioAlteredJson = {}
             self._buildRadioVoxIndex()
             self._populateRadioOffsets()
             if projectFilePath:
@@ -3709,6 +4132,12 @@ class MainWindow(QMainWindow):
             if radioManager.radioXMLData is not None:
                 xmlStr = parseString(ET.tostring(radioManager.radioXMLData)).toprettyxml(indent="  ")
                 zf.writestr('radio.xml', xmlStr)
+            if radioOriginalJson:
+                zf.writestr('radio-original.json',
+                            json.dumps(radioOriginalJson, ensure_ascii=False, indent=2))
+            if radioAlteredJson:
+                zf.writestr('radio-altered.json',
+                            json.dumps(radioAlteredJson, ensure_ascii=False, indent=2))
             if demoOriginalJson:
                 zf.writestr('demo-original.json',
                             json.dumps(demoOriginalJson, ensure_ascii=False, indent=2))
@@ -3743,6 +4172,7 @@ class MainWindow(QMainWindow):
         global demoOriginalJson, demoAlteredJson, demoOffsetsJson, demoSeqToOffset
         global voxOriginalJson, voxAlteredJson, voxOffsetsJson, voxSeqToOffset
         global zmovieOriginalJson, zmovieAlteredJson
+        global radioOriginalJson, radioAlteredJson
         global activeTblMapping, activeTblRaw
 
         filename = QFileDialog.getOpenFileName(
@@ -3773,6 +4203,9 @@ class MainWindow(QMainWindow):
                 zmAltJson     = json.loads(zf.read('zmovie-altered.json'))  if 'zmovie-altered.json'  in names else {}
                 # Backward compat
                 zmLegacyJson  = json.loads(zf.read('zmovie-dialogue.json')) if 'zmovie-dialogue.json' in names else {}
+                # Radio iseeva JSON
+                radioOrigJson = json.loads(zf.read('radio-original.json')) if 'radio-original.json' in names else {}
+                radioAltJson  = json.loads(zf.read('radio-altered.json'))  if 'radio-altered.json'  in names else {}
                 tblRaw      = zf.read('font.tbl').decode('utf-8')          if 'font.tbl'              in names else ""
         except Exception as e:
             QMessageBox.critical(self, "Open Failed", f"Could not read project file:\n{e}")
@@ -3792,6 +4225,15 @@ class MainWindow(QMainWindow):
                 self._populateRadioOffsets()
             except Exception as e:
                 QMessageBox.warning(self, "Radio Load Error", f"Failed to restore radio XML:\n{e}")
+
+        # Restore radio iseeva JSON
+        if radioOrigJson:
+            radioOriginalJson = radioOrigJson
+            radioAlteredJson  = radioAltJson
+        elif radioXml and radioManager.radioXMLData is not None:
+            # Migration: old .mtp with radio.xml but no iseeva JSONs
+            radioOriginalJson = _extractIseevaCallsFromXml(radioManager.radioXMLData)
+            radioAlteredJson = {}
 
         # Restore demo/vox subtitle JSON (auto-convert v1 → v2 if needed)
         if demoOrigJson:
