@@ -84,6 +84,7 @@
 
 ### Setup / Distribution
 - **Launch scripts** — `launch.sh` (macOS/Linux) and `launch.bat` (Windows); auto-setup on first run (venv, dependencies, submodule, ffmpeg)
+- **macOS .app bundle** — `MGS Dialogue Editor.app` with compiled native launcher; shows "MGS Dialogue Editor" in task switcher (Cmd+Tab), Dock, and menu bar instead of "Python". Launcher sets Homebrew PATH for Finder compatibility.
 - **Project restructure** — app source in `src/`, scripts submodule at root, clean top-level for end users
 - **Dual remote** — GitLab (private) + GitHub (public) with single `git push`
 - **GPL v3 license** — open source with community preservation addendum
@@ -102,6 +103,12 @@
 
 5. **RADIO.DAT executable patcher for --long mode** — the Japanese version requires a binary patch to the game executable to support the `--long` RADIO.DAT format (extended call lengths). Need to integrate a patcher that identifies the game version by SHA-256 hash and applies the correct patch. Should support multiple disc versions (JP, Integral, etc.) as part of a larger packaging/distribution flow.
 
+## Fixed Bugs
+
+1. **VOX subtitle dropped after radio split** — `_syncJsonToManager()` would break when the altered JSON had more subtitles than the binary demo object after a split/duplicate, silently dropping the new subtitle. Fixed by creating new `dialogueLine` objects for extra entries and appending them to the caption segment.
+
 ## Known Bugs
 
-1. **[scripts] Unknown chunk type crashes DEMO/VOX loading on Integral disc** — `demoClasses.py` line 637: `root.append("unknownChunk", {...})` passes two arguments to `ET.Element.append()` which only takes one. The Integral disc contains chunk types not seen in the original release, hitting the `case _:` fallback. Fix: wrap in `ET.Element()` — `root.append(ET.Element("unknownChunk", {...}))`. A local fix has been applied but needs to be committed to the `mgs1-scripts` submodule.
+1. **[USA disc] Radio call loading broken** — loading the first radio call on the USA version results in corrupted face-loading graphics and the call failing to start. Likely a format difference between JP and USA RADIO.DAT parsing.
+
+2. **[scripts] Unknown chunk type crashes DEMO/VOX loading on Integral disc** — `demoClasses.py` line 637: `root.append("unknownChunk", {...})` passes two arguments to `ET.Element.append()` which only takes one. The Integral disc contains chunk types not seen in the original release, hitting the `case _:` fallback. Fix: wrap in `ET.Element()` — `root.append(ET.Element("unknownChunk", {...}))`. A local fix has been applied but needs to be committed to the `mgs1-scripts` submodule.

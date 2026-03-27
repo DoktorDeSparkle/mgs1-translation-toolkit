@@ -3302,6 +3302,8 @@ class MainWindow(QMainWindow):
 
     def _syncJsonToManager(self, dialogueJson: dict, seqToOffset: dict, manager: dict):
         """Sync dialogue JSON edits into binary demo objects before patch-in-place compile."""
+        import struct
+        from scripts.demoClasses import dialogueLine
         for key, subtitles in dialogueJson.items():
             offset = seqToOffset.get(key)
             if not offset:
@@ -3310,16 +3312,26 @@ class MainWindow(QMainWindow):
             if demo is None:
                 continue
             lines = []
+            captionSeg = None
             for seg in demo.segments:
                 if hasattr(seg, 'subtitles'):
                     lines.extend(seg.subtitles)
+                    captionSeg = seg
             for idx, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
-                if idx >= len(lines):
-                    break
                 sub = subtitles[startFrame]
-                lines[idx].startFrame    = int(startFrame)
-                lines[idx].displayFrames = int(sub.get("duration", "0"))
-                lines[idx].text          = sub.get("text", "")
+                if idx < len(lines):
+                    lines[idx].startFrame    = int(startFrame)
+                    lines[idx].displayFrames = int(sub.get("duration", "0"))
+                    lines[idx].text          = sub.get("text", "")
+                elif captionSeg is not None:
+                    # Create new dialogueLine for added subtitles (e.g. from splits)
+                    stubData = struct.pack("<III", 0, int(startFrame), int(sub.get("duration", "0")))
+                    stubData += bytes(4)  # buffer
+                    stubData += b'\x00'   # minimal text terminator
+                    newLine = dialogueLine(stubData, captionSeg.kanjiDict)
+                    newLine.text = sub.get("text", "")
+                    captionSeg.subtitles.append(newLine)
+                    print(f"[sync] Created new subtitle line in {key}: frame={startFrame}")
 
     def _syncJsonToDemoManager(self):
         self._syncJsonToManager(demoAlteredJson, demoSeqToOffset, demoManager)
@@ -4362,7 +4374,16 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # Set macOS menu bar app name (must be before QApplication init)
+    if sys.platform == "darwin":
+        try:
+            from Foundation import NSBundle
+            info = NSBundle.mainBundle().localizedInfoDictionary() or NSBundle.mainBundle().infoDictionary()
+            info["CFBundleName"] = "MGS Dialogue Editor"
+        except ImportError:
+            pass
     app = QApplication(sys.argv)
+    app.setApplicationName("MGS Dialogue Editor")
     # Set app icon (used by macOS dock/task switcher)
     iconPath = os.path.join(os.path.dirname(__file__), "icon.png")
     if os.path.exists(iconPath):
