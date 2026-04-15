@@ -741,7 +741,11 @@ class FinalizeProjectDialog(QDialog):
         self.chkDoubleWidth = QCheckBox("Double-width save blocks (-D)")
         radioLayout.addRow(self.chkDoubleWidth)
 
+        self.chkPad = QCheckBox("Pad calls to 0x800 (-P)")
+        radioLayout.addRow(self.chkPad)
+
         self.chkIntegral = QCheckBox("Integral disc (--integral)")
+        self.chkIntegral.toggled.connect(self._onIntegralToggled)
         radioLayout.addRow(self.chkIntegral)
 
         self.chkLong = QCheckBox("Long call headers (--long)")
@@ -835,6 +839,14 @@ class FinalizeProjectDialog(QDialog):
 
         self.setLayout(layout)
 
+    def _onIntegralToggled(self, checked):
+        """Integral implies padding — force pad on when integral is checked."""
+        if checked:
+            self.chkPad.setChecked(True)
+            self.chkPad.setEnabled(False)
+        else:
+            self.chkPad.setEnabled(True)
+
     def _updateStageEnabled(self):
         """Grey out STAGE.DIR section unless Radio or Demo is checked."""
         radioOn = self.radioGroup.isChecked()
@@ -879,6 +891,8 @@ class FinalizeProjectDialog(QDialog):
     def doubleWidth(self): return self.chkDoubleWidth.isChecked()
     @property
     def debugOutput(self): return self.chkDebug.isChecked()
+    @property
+    def pad(self): return self.chkPad.isChecked()
     @property
     def integral(self): return self.chkIntegral.isChecked()
     @property
@@ -1536,7 +1550,7 @@ class MainWindow(QMainWindow):
         self.actionSaveProject = QAction("Save Project", self)
         self.actionSaveProject.setStatusTip("Save the current project to its .mtp file")
         self.actionSaveProject.setShortcut("Ctrl+S")
-        self.actionSaveProject.setEnabled(False)
+        self.actionSaveProject.setEnabled(True)
         self.actionSaveProject.triggered.connect(self.saveProject)
 
         self.actionSaveProjectAs = QAction("Save Project As...", self)
@@ -3705,7 +3719,7 @@ class MainWindow(QMainWindow):
                         prepare=False, hex=dlg.useOrigHex,
                         debug=dlg.debugOutput, double=dlg.doubleWidth,
                         integral=dlg.integral,
-                        long=dlg.longHeaders, pad=False, roundtrip=False,
+                        long=dlg.longHeaders, pad=dlg.pad, roundtrip=False,
                     )
                     RDR.main(args)
                     detail = f"RADIO.DAT → {radioOut}"
