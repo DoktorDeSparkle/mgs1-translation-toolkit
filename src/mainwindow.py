@@ -608,16 +608,6 @@ class PreferencesDialog(QDialog):
             settings.value("editor/warn_on_revert", True, type=bool))
         editorLayout.addWidget(self.chkRevertWarn)
 
-        self.chkShowIndexNumbers = QCheckBox("Show index numbers in lists")
-        self.chkShowIndexNumbers.setChecked(
-            settings.value("editor/show_index_numbers", True, type=bool))
-        editorLayout.addWidget(self.chkShowIndexNumbers)
-
-        self.chkShowOriginalColumn = QCheckBox("Show original text column in subtitle list")
-        self.chkShowOriginalColumn.setChecked(
-            settings.value("editor/show_original_column", True, type=bool))
-        editorLayout.addWidget(self.chkShowOriginalColumn)
-
         editorGroup.setLayout(editorLayout)
         layout.addWidget(editorGroup)
 
@@ -659,10 +649,6 @@ class PreferencesDialog(QDialog):
                                 self.comboSourceLang.currentData())
         self._settings.setValue("editor/warn_on_revert",
                                 self.chkRevertWarn.isChecked())
-        self._settings.setValue("editor/show_index_numbers",
-                                self.chkShowIndexNumbers.isChecked())
-        self._settings.setValue("editor/show_original_column",
-                                self.chkShowOriginalColumn.isChecked())
         self._settings.setValue("build/output_dir",
                                 self.txtDefaultOutDir.text().strip())
         super().accept()
@@ -1468,26 +1454,20 @@ class SubtitleTableWidget(QTableWidget):
       currentItemChanged signal (emulated via currentCellChanged).
     """
 
-    COL_IDX   = 0
-    COL_ORIG  = 1
-    COL_EDIT  = 2
-    COL_MARK  = 3
-
-    COLOR_ODD  = QColor(255, 255, 255)
-    COLOR_EVEN = QColor(240, 242, 245)
+    COL_IDX  = 0
+    COL_SUB  = 1
+    COL_EDIT = 2
 
     currentItemChanged = Signal(object, object)
 
     def __init__(self, parent=None):
-        super().__init__(0, 4, parent)
-        self._origTexts: list[str] = []
+        super().__init__(0, 3, parent)
 
-        self.setHorizontalHeaderLabels(["#", "Original", "Edited", "✓"])
+        self.setHorizontalHeaderLabels(["#", "Subtitle", "Edited"])
         hdr = self.horizontalHeader()
         hdr.setSectionResizeMode(self.COL_IDX,  QHeaderView.ResizeToContents)
-        hdr.setSectionResizeMode(self.COL_ORIG,  QHeaderView.Stretch)
-        hdr.setSectionResizeMode(self.COL_EDIT,  QHeaderView.Stretch)
-        hdr.setSectionResizeMode(self.COL_MARK,  QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(self.COL_SUB,  QHeaderView.Stretch)
+        hdr.setSectionResizeMode(self.COL_EDIT, QHeaderView.Stretch)
         hdr.setHighlightSections(False)
         hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
@@ -1496,31 +1476,14 @@ class SubtitleTableWidget(QTableWidget):
         self.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.setAlternatingRowColors(False)
+        self.setAlternatingRowColors(True)
         self.setShowGrid(True)
         self.setGridStyle(Qt.SolidLine)
         self.setWordWrap(True)
 
         self.setStyleSheet("""
-            QTableWidget {
-                gridline-color: #c8c8c8;
-                border: 1px solid #b0b0b0;
-                font-size: 12px;
-            }
             QTableWidget::item {
                 padding: 3px 6px;
-                border: none;
-            }
-            QTableWidget::item:selected {
-                background: #cce5ff;
-                color: #000000;
-            }
-            QHeaderView::section {
-                background: #e8eaed;
-                border: 1px solid #c8c8c8;
-                padding: 4px 6px;
-                font-weight: bold;
-                font-size: 12px;
             }
         """)
 
@@ -1530,7 +1493,6 @@ class SubtitleTableWidget(QTableWidget):
 
     def clear(self):
         self.setRowCount(0)
-        self._origTexts.clear()
 
     def count(self) -> int:
         return self.rowCount()
@@ -1546,54 +1508,33 @@ class SubtitleTableWidget(QTableWidget):
 
     # ── Population ────────────────────────────────────────────────────────
 
-    def addSubtitleRow(self, index: int, text: str,
-                       origText: str = "", modified: bool = False):
+    def addSubtitleRow(self, index: int, text: str, editedText: str = ""):
+        """Append a subtitle row.
+
+        Args:
+            index:      display index (0-based)
+            text:       the subtitle text (always shown)
+            editedText: edited version (shown only when entry has been modified)
+        """
         row = self.rowCount()
         self.insertRow(row)
-        self._origTexts.append(origText or text)
 
         idxItem  = QTableWidgetItem(str(index + 1))
-        origItem = QTableWidgetItem((origText or text).replace("\uFF5C", "\n"))
-        editItem = QTableWidgetItem(text.replace("｜", "\n"))
-        markItem = QTableWidgetItem("\u2022" if modified else "")
+        subItem  = QTableWidgetItem(text.replace("｜", "\n"))
+        editItem = QTableWidgetItem(editedText.replace("｜", "\n") if editedText else "")
 
         idxItem.setTextAlignment(Qt.AlignCenter)
-        origItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        subItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         editItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        markItem.setTextAlignment(Qt.AlignCenter)
 
-        for item in (idxItem, origItem, editItem, markItem):
+        for item in (idxItem, subItem, editItem):
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
         self.setItem(row, self.COL_IDX,  idxItem)
-        self.setItem(row, self.COL_ORIG, origItem)
+        self.setItem(row, self.COL_SUB,  subItem)
         self.setItem(row, self.COL_EDIT, editItem)
-        self.setItem(row, self.COL_MARK, markItem)
-
-        bg = self.COLOR_ODD if row % 2 == 0 else self.COLOR_EVEN
-        for col in range(self.columnCount()):
-            it = self.item(row, col)
-            if it:
-                it.setBackground(bg)
 
         self.resizeRowToContents(row)
-
-    def setRadioMode(self, radio: bool):
-        if radio:
-            self.setColumnHidden(self.COL_ORIG, True)
-            self.setHorizontalHeaderLabels(["#", "Original", "Subtitle", "✓"])
-        else:
-            self.setColumnHidden(self.COL_ORIG, False)
-            self.setHorizontalHeaderLabels(["#", "Original", "Edited", "✓"])
-
-    def setOriginalColumnVisible(self, visible: bool):
-        self.setColumnHidden(self.COL_ORIG, not visible)
-
-    def updateRowMark(self, row: int, modified: bool):
-        if 0 <= row < self.rowCount():
-            it = self.item(row, self.COL_MARK)
-            if it:
-                it.setText("\u2022" if modified else "")
 
     def updateRowEditText(self, row: int, text: str):
         if 0 <= row < self.rowCount():
@@ -1678,9 +1619,6 @@ class MainWindow(QMainWindow):
         oldSubsList.setParent(None)
         self.ui.subsPreviewList = SubtitleTableWidget(self)
         subsLayout.insertWidget(subsIdx, self.ui.subsPreviewList)
-        # Apply original-column preference (hidden in radio mode regardless)
-        self._showOriginalColumn = self._appSettings.value(
-            "editor/show_original_column", True, type=bool)
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
@@ -2224,7 +2162,7 @@ class MainWindow(QMainWindow):
 
         self.ui.audioCueListView.clear()
         for i, audio in enumerate(radioManager.getVoxOffsets()):
-            QListWidgetItem(f"{self._idxPrefix(i)}{audio}", self.ui.audioCueListView)
+            QListWidgetItem(audio, self.ui.audioCueListView)
 
         self._clearEditor()
 
@@ -2234,14 +2172,15 @@ class MainWindow(QMainWindow):
         else:
             # No VOX_CUES (e.g. staff calls): load SUBTITLE elements directly from the call
             self.ui.subsPreviewList.clear()
-            self.ui.subsPreviewList.setRadioMode(True)
             callOffset = radioManager.workingCall.get("offset")
             # For direct subs, vox key = call offset
             voxSubs = _getRadioVoxSubs(callOffset, callOffset)
             for i, sub in enumerate(radioManager.workingCall.findall("SUBTITLE")):
                 subOffset = sub.get("offset")
-                text = voxSubs.get(subOffset, sub.get("text", ""))
-                self.ui.subsPreviewList.addSubtitleRow(i, f"{self._idxPrefix(i)}{text}")
+                original = sub.get("text", "")
+                edited = voxSubs.get(subOffset, "")
+                self.ui.subsPreviewList.addSubtitleRow(
+                    i, original, editedText=edited if edited != original else "")
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2256,19 +2195,17 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        self._applyOriginalColumnVisibility()
-        # Prefer altered, fall back to original
-        subtitles = demoAlteredJson.get(key, demoOriginalJson.get(key, {}))
         origSubs = demoOriginalJson.get(key, {})
+        altSubs = demoAlteredJson.get(key, {})
         modified = key in demoAlteredJson
-        for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
-            sub = subtitles[startFrame]
-            text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            origSub = origSubs.get(startFrame, {})
+        # Show original subtitles; show edited text only where altered
+        for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
+            origSub = origSubs[startFrame]
             origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            altSub = altSubs.get(startFrame, {})
+            editedText = altSub.get("text", "").strip() if altSub else ""
             self.ui.subsPreviewList.addSubtitleRow(
-                i, f"{self._idxPrefix(i)}{text}",
-                origText=origText, modified=modified)
+                i, origText, editedText=editedText)
         # Enable revert button only if this entry has been altered
         self.revertVoxButton.setVisible(self._editorMode == "demo" and modified)
         if self.ui.subsPreviewList.count() > 0:
@@ -2285,19 +2222,15 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        self._applyOriginalColumnVisibility()
-        # Prefer altered, fall back to original
-        subtitles = zmovieAlteredJson.get(key, zmovieOriginalJson.get(key, {}))
         origSubs = zmovieOriginalJson.get(key, {})
-        modified = key in zmovieAlteredJson
-        for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
-            sub = subtitles[startFrame]
-            text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            origSub = origSubs.get(startFrame, {})
+        altSubs = zmovieAlteredJson.get(key, {})
+        for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
+            origSub = origSubs[startFrame]
             origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            altSub = altSubs.get(startFrame, {})
+            editedText = altSub.get("text", "").strip() if altSub else ""
             self.ui.subsPreviewList.addSubtitleRow(
-                i, f"{self._idxPrefix(i)}{text}",
-                origText=origText, modified=modified)
+                i, origText, editedText=editedText)
         self.revertVoxButton.setVisible(self._editorMode == "zmovie" and modified)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
@@ -2313,21 +2246,17 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
-        self._applyOriginalColumnVisibility()
-        # Prefer altered, fall back to original
-        subtitles = voxAlteredJson.get(key, voxOriginalJson.get(key, {}))
         origSubs = voxOriginalJson.get(key, {})
-        modified = key in voxAlteredJson
-        for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
-            sub = subtitles[startFrame]
-            text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            origSub = origSubs.get(startFrame, {})
+        altSubs = voxAlteredJson.get(key, {})
+        for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
+            origSub = origSubs[startFrame]
             origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            altSub = altSubs.get(startFrame, {})
+            editedText = altSub.get("text", "").strip() if altSub else ""
             self.ui.subsPreviewList.addSubtitleRow(
-                i, f"{self._idxPrefix(i)}{text}",
-                origText=origText, modified=modified)
+                i, origText, editedText=editedText)
         # Enable revert button only if this entry has been altered
-        self.revertVoxButton.setVisible(self._editorMode == "vox" and modified)
+        self.revertVoxButton.setVisible(self._editorMode == "vox" and key in voxAlteredJson)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2346,17 +2275,18 @@ class MainWindow(QMainWindow):
         currentVoxOffset = str(byteAddr)
 
         self.ui.VoxAddressDisplay.setText(currentVoxOffset)
-        self.ui.VoxBlockAddressDisplay.setText("0x" + voxOffsetHex)
+        self.ui.VoxBlockAddressDisplay.setText("0x" + voxOffsetHex.upper())
 
         self.ui.subsPreviewList.clear()
-        self.ui.subsPreviewList.setRadioMode(True)
         callOffset = radioManager.workingCall.get("offset")
         voxOffset = radioManager.workingVox.get("offset")
         voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
         for i, sub in enumerate(radioManager.workingVox.findall("SUBTITLE")):
             subOffset = sub.get("offset")
-            text = voxSubs.get(subOffset, sub.get("text", ""))
-            self.ui.subsPreviewList.addSubtitleRow(i, f"{self._idxPrefix(i)}{text}")
+            original = sub.get("text", "")
+            edited = voxSubs.get(subOffset, "")
+            self.ui.subsPreviewList.addSubtitleRow(
+                i, original, editedText=edited if edited != original else "")
 
         self._clearEditor()
         if self.ui.subsPreviewList.count() > 0:
@@ -2547,10 +2477,7 @@ class MainWindow(QMainWindow):
     def _openPreferences(self):
         """Show the Preferences dialog."""
         dlg = PreferencesDialog(self._appSettings, parent=self)
-        if dlg.exec() == QDialog.Accepted:
-            self._showOriginalColumn = self._appSettings.value(
-                "editor/show_original_column", True, type=bool)
-            self._applyOriginalColumnVisibility()
+        dlg.exec()
 
     def _translateLine(self):
         """Translate the current editor text using deep_translator."""
@@ -2910,50 +2837,35 @@ class MainWindow(QMainWindow):
         """Rebuild the subtitle list widget from the current data source."""
         self.ui.subsPreviewList.clear()
         if self._editorMode in ("demo", "vox", "zmovie"):
-            self._applyOriginalColumnVisibility()
-            key, djson = self._modeData()
-            subtitles = djson.get(key, {})
-            # Get original subtitles for comparison column
             if self._editorMode == "demo":
+                key = currentDemoKey
                 origSubs = demoOriginalJson.get(key, {})
-                modified = key in demoAlteredJson
+                altSubs = demoAlteredJson.get(key, {})
             elif self._editorMode == "vox":
+                key = currentVoxKey
                 origSubs = voxOriginalJson.get(key, {})
-                modified = key in voxAlteredJson
+                altSubs = voxAlteredJson.get(key, {})
             else:
+                key = currentZmovieKey
                 origSubs = zmovieOriginalJson.get(key, {})
-                modified = key in zmovieAlteredJson
-            for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
-                sub = subtitles[startFrame]
-                text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-                origSub = origSubs.get(startFrame, {})
+                altSubs = zmovieAlteredJson.get(key, {})
+            for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
+                origSub = origSubs[startFrame]
                 origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                altSub = altSubs.get(startFrame, {})
+                editedText = altSub.get("text", "").strip() if altSub else ""
                 self.ui.subsPreviewList.addSubtitleRow(
-                    i, f"{self._idxPrefix(i)}{text}",
-                    origText=origText, modified=modified)
+                    i, origText, editedText=editedText)
         else:
-            self.ui.subsPreviewList.setRadioMode(True)
             callOffset = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
             voxOffset = self._radioVoxKey() if callOffset else None
             voxSubs = _getRadioVoxSubs(callOffset, voxOffset) if callOffset and voxOffset else {}
             for i, sub in enumerate(self._radioSubtitleElems()):
                 subOffset = sub.get("offset")
-                text = voxSubs.get(subOffset, sub.get("text", ""))
-                self.ui.subsPreviewList.addSubtitleRow(i, f"{self._idxPrefix(i)}{text}")
-
-    def _applyOriginalColumnVisibility(self):
-        """Show or hide the Original column based on mode and preference."""
-        if self._editorMode == "radio":
-            self.ui.subsPreviewList.setRadioMode(True)
-        else:
-            self.ui.subsPreviewList.setRadioMode(False)
-            self.ui.subsPreviewList.setOriginalColumnVisible(self._showOriginalColumn)
-
-    def _idxPrefix(self, i: int) -> str:
-        """Return a zero-padded index prefix if the setting is enabled, else empty string."""
-        if self._appSettings.value("editor/show_index_numbers", True, type=bool):
-            return f"{i:02d}  "
-        return ""
+                original = sub.get("text", "")
+                edited = voxSubs.get(subOffset, "")
+                self.ui.subsPreviewList.addSubtitleRow(
+                    i, original, editedText=edited if edited != original else "")
 
     def _clearEditor(self):
         """Reset the editor panel."""
