@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QFileDialog,
     QPushButton, QMessageBox, QGraphicsScene, QGraphicsTextItem,
     QGroupBox, QCheckBox, QLineEdit, QFormLayout,
     QFrame, QComboBox, QSizePolicy, QScrollArea, QTabWidget,
-    QDialogButtonBox, QWidget)
+    QDialogButtonBox, QWidget, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QElapsedTimer, QUrl, QSettings
 from PySide6.QtGui import QFont, QColor, QAction, QKeySequence
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
@@ -612,6 +613,11 @@ class PreferencesDialog(QDialog):
             settings.value("editor/show_index_numbers", True, type=bool))
         editorLayout.addWidget(self.chkShowIndexNumbers)
 
+        self.chkShowOriginalColumn = QCheckBox("Show original text column in subtitle list")
+        self.chkShowOriginalColumn.setChecked(
+            settings.value("editor/show_original_column", True, type=bool))
+        editorLayout.addWidget(self.chkShowOriginalColumn)
+
         editorGroup.setLayout(editorLayout)
         layout.addWidget(editorGroup)
 
@@ -655,6 +661,8 @@ class PreferencesDialog(QDialog):
                                 self.chkRevertWarn.isChecked())
         self._settings.setValue("editor/show_index_numbers",
                                 self.chkShowIndexNumbers.isChecked())
+        self._settings.setValue("editor/show_original_column",
+                                self.chkShowOriginalColumn.isChecked())
         self._settings.setValue("build/output_dir",
                                 self.txtDefaultOutDir.text().strip())
         super().accept()
@@ -1445,6 +1453,163 @@ class FontEditorDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to inject font:\n{e}")
 
 
+class SubtitleTableWidget(QTableWidget):
+    """Drop-in replacement for subsPreviewList.
+    Displays subtitles as a table with Original and Edited columns.
+
+    Columns:
+      0 – #          (index, fixed narrow)
+      1 – Original   (read-only original text)
+      2 – Edited     (current / edited text)
+      3 – ✓          (bullet marker for modified entries, narrow)
+
+    Compatible with the QListWidget API subset used by MainWindow:
+      clear(), count(), currentRow(), setCurrentRow(),
+      currentItemChanged signal (emulated via currentCellChanged).
+    """
+
+    COL_IDX   = 0
+    COL_ORIG  = 1
+    COL_EDIT  = 2
+    COL_MARK  = 3
+
+    COLOR_ODD  = QColor(255, 255, 255)
+    COLOR_EVEN = QColor(240, 242, 245)
+
+    currentItemChanged = Signal(object, object)
+
+    def __init__(self, parent=None):
+        super().__init__(0, 4, parent)
+        self._origTexts: list[str] = []
+
+        self.setHorizontalHeaderLabels(["#", "Original", "Edited", "✓"])
+        hdr = self.horizontalHeader()
+        hdr.setSectionResizeMode(self.COL_IDX,  QHeaderView.ResizeToContents)
+        hdr.setSectionResizeMode(self.COL_ORIG,  QHeaderView.Stretch)
+        hdr.setSectionResizeMode(self.COL_EDIT,  QHeaderView.Stretch)
+        hdr.setSectionResizeMode(self.COL_MARK,  QHeaderView.ResizeToContents)
+        hdr.setHighlightSections(False)
+        hdr.setDefaultAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        self.verticalHeader().setVisible(False)
+
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setAlternatingRowColors(False)
+        self.setShowGrid(True)
+        self.setGridStyle(Qt.SolidLine)
+        self.setWordWrap(True)
+
+        self.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #c8c8c8;
+                border: 1px solid #b0b0b0;
+                font-size: 12px;
+            }
+            QTableWidget::item {
+                padding: 3px 6px;
+                border: none;
+            }
+            QTableWidget::item:selected {
+                background: #cce5ff;
+                color: #000000;
+            }
+            QHeaderView::section {
+                background: #e8eaed;
+                border: 1px solid #c8c8c8;
+                padding: 4px 6px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+        """)
+
+        self.currentCellChanged.connect(self._onCellChanged)
+
+    # ── Compat API ────────────────────────────────────────────────────────
+
+    def clear(self):
+        self.setRowCount(0)
+        self._origTexts.clear()
+
+    def count(self) -> int:
+        return self.rowCount()
+
+    def currentRow(self) -> int:
+        return super().currentRow()
+
+    def setCurrentRow(self, row: int):
+        if 0 <= row < self.rowCount():
+            self.selectRow(row)
+        elif self.rowCount() == 0:
+            self.clearSelection()
+
+    # ── Population ────────────────────────────────────────────────────────
+
+    def addSubtitleRow(self, index: int, text: str,
+                       origText: str = "", modified: bool = False):
+        row = self.rowCount()
+        self.insertRow(row)
+        self._origTexts.append(origText or text)
+
+        idxItem  = QTableWidgetItem(str(index + 1))
+        origItem = QTableWidgetItem((origText or text).replace("\uFF5C", "\n"))
+        editItem = QTableWidgetItem(text.replace("｜", "\n"))
+        markItem = QTableWidgetItem("\u2022" if modified else "")
+
+        idxItem.setTextAlignment(Qt.AlignCenter)
+        origItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        editItem.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        markItem.setTextAlignment(Qt.AlignCenter)
+
+        for item in (idxItem, origItem, editItem, markItem):
+            item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+
+        self.setItem(row, self.COL_IDX,  idxItem)
+        self.setItem(row, self.COL_ORIG, origItem)
+        self.setItem(row, self.COL_EDIT, editItem)
+        self.setItem(row, self.COL_MARK, markItem)
+
+        bg = self.COLOR_ODD if row % 2 == 0 else self.COLOR_EVEN
+        for col in range(self.columnCount()):
+            it = self.item(row, col)
+            if it:
+                it.setBackground(bg)
+
+        self.resizeRowToContents(row)
+
+    def setRadioMode(self, radio: bool):
+        if radio:
+            self.setColumnHidden(self.COL_ORIG, True)
+            self.setHorizontalHeaderLabels(["#", "Original", "Subtitle", "✓"])
+        else:
+            self.setColumnHidden(self.COL_ORIG, False)
+            self.setHorizontalHeaderLabels(["#", "Original", "Edited", "✓"])
+
+    def setOriginalColumnVisible(self, visible: bool):
+        self.setColumnHidden(self.COL_ORIG, not visible)
+
+    def updateRowMark(self, row: int, modified: bool):
+        if 0 <= row < self.rowCount():
+            it = self.item(row, self.COL_MARK)
+            if it:
+                it.setText("\u2022" if modified else "")
+
+    def updateRowEditText(self, row: int, text: str):
+        if 0 <= row < self.rowCount():
+            it = self.item(row, self.COL_EDIT)
+            if it:
+                it.setText(text.replace("｜", "\n"))
+            self.resizeRowToContents(row)
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    def _onCellChanged(self, curRow, _curCol, prevRow, _prevCol):
+        cur  = self.item(curRow,  0) if curRow  >= 0 else None
+        prev = self.item(prevRow, 0) if prevRow >= 0 else None
+        self.currentItemChanged.emit(cur, prev)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1504,6 +1669,18 @@ class MainWindow(QMainWindow):
         offsetRow.addLayout(rightCol, stretch=1)
 
         parentLayout.insertLayout(comboIdx + 1, offsetRow)
+
+        # ── Replace subsPreviewList with SubtitleTableWidget ────────────────
+        oldSubsList = self.ui.subsPreviewList
+        subsLayout = oldSubsList.parentWidget().layout()
+        subsIdx = subsLayout.indexOf(oldSubsList)
+        oldSubsList.setVisible(False)
+        oldSubsList.setParent(None)
+        self.ui.subsPreviewList = SubtitleTableWidget(self)
+        subsLayout.insertWidget(subsIdx, self.ui.subsPreviewList)
+        # Apply original-column preference (hidden in radio mode regardless)
+        self._showOriginalColumn = self._appSettings.value(
+            "editor/show_original_column", True, type=bool)
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
@@ -2057,13 +2234,14 @@ class MainWindow(QMainWindow):
         else:
             # No VOX_CUES (e.g. staff calls): load SUBTITLE elements directly from the call
             self.ui.subsPreviewList.clear()
+            self.ui.subsPreviewList.setRadioMode(True)
             callOffset = radioManager.workingCall.get("offset")
             # For direct subs, vox key = call offset
             voxSubs = _getRadioVoxSubs(callOffset, callOffset)
             for i, sub in enumerate(radioManager.workingCall.findall("SUBTITLE")):
                 subOffset = sub.get("offset")
                 text = voxSubs.get(subOffset, sub.get("text", ""))
-                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+                self.ui.subsPreviewList.addSubtitleRow(i, f"{self._idxPrefix(i)}{text}")
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2078,14 +2256,21 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
+        self._applyOriginalColumnVisibility()
         # Prefer altered, fall back to original
         subtitles = demoAlteredJson.get(key, demoOriginalJson.get(key, {}))
+        origSubs = demoOriginalJson.get(key, {})
+        modified = key in demoAlteredJson
         for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+            origSub = origSubs.get(startFrame, {})
+            origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            self.ui.subsPreviewList.addSubtitleRow(
+                i, f"{self._idxPrefix(i)}{text}",
+                origText=origText, modified=modified)
         # Enable revert button only if this entry has been altered
-        self.revertVoxButton.setVisible(self._editorMode == "demo" and key in demoAlteredJson)
+        self.revertVoxButton.setVisible(self._editorMode == "demo" and modified)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2100,13 +2285,20 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
+        self._applyOriginalColumnVisibility()
         # Prefer altered, fall back to original
         subtitles = zmovieAlteredJson.get(key, zmovieOriginalJson.get(key, {}))
+        origSubs = zmovieOriginalJson.get(key, {})
+        modified = key in zmovieAlteredJson
         for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
-        self.revertVoxButton.setVisible(self._editorMode == "zmovie" and key in zmovieAlteredJson)
+            origSub = origSubs.get(startFrame, {})
+            origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            self.ui.subsPreviewList.addSubtitleRow(
+                i, f"{self._idxPrefix(i)}{text}",
+                origText=origText, modified=modified)
+        self.revertVoxButton.setVisible(self._editorMode == "zmovie" and modified)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2121,14 +2313,21 @@ class MainWindow(QMainWindow):
         currentSubIndex = -1
         self._clearEditor()
         self.ui.subsPreviewList.clear()
+        self._applyOriginalColumnVisibility()
         # Prefer altered, fall back to original
         subtitles = voxAlteredJson.get(key, voxOriginalJson.get(key, {}))
+        origSubs = voxOriginalJson.get(key, {})
+        modified = key in voxAlteredJson
         for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
             sub = subtitles[startFrame]
             text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+            origSub = origSubs.get(startFrame, {})
+            origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            self.ui.subsPreviewList.addSubtitleRow(
+                i, f"{self._idxPrefix(i)}{text}",
+                origText=origText, modified=modified)
         # Enable revert button only if this entry has been altered
-        self.revertVoxButton.setVisible(self._editorMode == "vox" and key in voxAlteredJson)
+        self.revertVoxButton.setVisible(self._editorMode == "vox" and modified)
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2150,13 +2349,14 @@ class MainWindow(QMainWindow):
         self.ui.VoxBlockAddressDisplay.setText("0x" + voxOffsetHex)
 
         self.ui.subsPreviewList.clear()
+        self.ui.subsPreviewList.setRadioMode(True)
         callOffset = radioManager.workingCall.get("offset")
         voxOffset = radioManager.workingVox.get("offset")
         voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
         for i, sub in enumerate(radioManager.workingVox.findall("SUBTITLE")):
             subOffset = sub.get("offset")
             text = voxSubs.get(subOffset, sub.get("text", ""))
-            QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+            self.ui.subsPreviewList.addSubtitleRow(i, f"{self._idxPrefix(i)}{text}")
 
         self._clearEditor()
         if self.ui.subsPreviewList.count() > 0:
@@ -2347,7 +2547,10 @@ class MainWindow(QMainWindow):
     def _openPreferences(self):
         """Show the Preferences dialog."""
         dlg = PreferencesDialog(self._appSettings, parent=self)
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted:
+            self._showOriginalColumn = self._appSettings.value(
+                "editor/show_original_column", True, type=bool)
+            self._applyOriginalColumnVisibility()
 
     def _translateLine(self):
         """Translate the current editor text using deep_translator."""
@@ -2707,20 +2910,44 @@ class MainWindow(QMainWindow):
         """Rebuild the subtitle list widget from the current data source."""
         self.ui.subsPreviewList.clear()
         if self._editorMode in ("demo", "vox", "zmovie"):
+            self._applyOriginalColumnVisibility()
             key, djson = self._modeData()
             subtitles = djson.get(key, {})
+            # Get original subtitles for comparison column
+            if self._editorMode == "demo":
+                origSubs = demoOriginalJson.get(key, {})
+                modified = key in demoAlteredJson
+            elif self._editorMode == "vox":
+                origSubs = voxOriginalJson.get(key, {})
+                modified = key in voxAlteredJson
+            else:
+                origSubs = zmovieOriginalJson.get(key, {})
+                modified = key in zmovieAlteredJson
             for i, startFrame in enumerate(sorted(subtitles.keys(), key=int)):
                 sub = subtitles[startFrame]
                 text = sub.get("text", "").strip() or f"[Frame {startFrame}]"
-                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+                origSub = origSubs.get(startFrame, {})
+                origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                self.ui.subsPreviewList.addSubtitleRow(
+                    i, f"{self._idxPrefix(i)}{text}",
+                    origText=origText, modified=modified)
         else:
+            self.ui.subsPreviewList.setRadioMode(True)
             callOffset = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
             voxOffset = self._radioVoxKey() if callOffset else None
             voxSubs = _getRadioVoxSubs(callOffset, voxOffset) if callOffset and voxOffset else {}
             for i, sub in enumerate(self._radioSubtitleElems()):
                 subOffset = sub.get("offset")
                 text = voxSubs.get(subOffset, sub.get("text", ""))
-                QListWidgetItem(f"{self._idxPrefix(i)}{text}", self.ui.subsPreviewList)
+                self.ui.subsPreviewList.addSubtitleRow(i, f"{self._idxPrefix(i)}{text}")
+
+    def _applyOriginalColumnVisibility(self):
+        """Show or hide the Original column based on mode and preference."""
+        if self._editorMode == "radio":
+            self.ui.subsPreviewList.setRadioMode(True)
+        else:
+            self.ui.subsPreviewList.setRadioMode(False)
+            self.ui.subsPreviewList.setOriginalColumnVisible(self._showOriginalColumn)
 
     def _idxPrefix(self, i: int) -> str:
         """Return a zero-padded index prefix if the setting is enabled, else empty string."""
