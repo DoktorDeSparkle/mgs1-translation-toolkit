@@ -4,6 +4,9 @@ A PySide6 desktop application for editing Metal Gear Solid 1 subtitle data. Buil
 
 ![Codec Screen](src/icon.png)
 
+Feedback? Let me know here or via the google form:
+https://docs.google.com/forms/d/e/1FAIpQLSeE_zRUerJRy9JVyAvv1rnbdNo2iz4HhkOCpxs1XO_apql1ww/viewform?usp=header
+
 ## Features
 
 - **Four editor modes**: RADIO (codec calls), DEMO (cutscenes), VOX (voice clips), ZMOVIE (FMV subtitles)
