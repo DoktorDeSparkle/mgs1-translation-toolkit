@@ -62,6 +62,10 @@ zmovieOriginalData: bytes = b''  # original ZMOVIE.STR bytes for patch-in-place 
 zmovieFilePath:     str   = ""
 currentZmovieKey:   str   = ""   # e.g. "zmovie-00"
 
+# Graphics dictionary state (per-entry custom 12x12 tiles)
+radioGraphicsJson: dict = {}   # {"call-offset": "hex-of-36-byte-tiles", ...}
+demoGraphicsJson:  dict = {}   # {"demo-01": "hex-of-36-byte-tiles", ...}
+
 def _mergedZmovieJson() -> dict:
     """Return zmovieOriginalJson with zmovieAlteredJson overlaid (altered takes priority)."""
     merged = dict(zmovieOriginalJson)
@@ -1439,6 +1443,311 @@ class FontEditorDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to inject font:\n{e}")
 
 
+class CallDictEditorDialog(QDialog):
+    """Dialog for viewing/editing the per-entry custom graphics dictionary.
+
+    Each entry (radio call, demo, vox, zmovie) can contain an array of
+    36-byte tiles (12x12 pixels, 2bpp) that define custom characters for
+    Japanese text rendering.  This dialog presents those tiles in a grid,
+    lets the user import/export PNGs, and edit the character mapping.
+    """
+
+    COLS  = 16    # grid columns
+    SCALE = 4     # display scale (12px -> 48px)
+
+    def __init__(self, entryKey: str, graphicsHex: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Call Dictionary Editor \u2014 {entryKey}")
+        self.setMinimumSize(700, 450)
+
+        from scripts.fontTools import mgsFontTools as MFT
+        from scripts.translation import characters
+        self._MFT = MFT
+        self._characters = characters
+
+        self._entryKey = entryKey
+        self._graphicsHex = graphicsHex or ""
+        self._tiles: list[bytes] = []       # list of 36-byte tile blobs
+        self._tileButtons: list[QPushButton] = []
+        self._modifiedSlots: set[int] = set()
+        self._selectedSlot: int = -1
+
+        self._parseTiles()
+        self._buildUI()
+        if self._tiles:
+            self._buildGrid()
+            self._refreshGrid()
+
+    # ── Properties ───────────────────────────────────────────────────────
+
+    @property
+    def graphicsHex(self) -> str:
+        """Return the (possibly modified) hex string of all tiles."""
+        return "".join(t.hex() for t in self._tiles)
+
+    @property
+    def modified(self) -> bool:
+        return len(self._modifiedSlots) > 0
+
+    # ── Tile parsing ─────────────────────────────────────────────────────
+
+    def _parseTiles(self):
+        """Split the hex string into 36-byte (72 hex char) tile blobs."""
+        raw = self._graphicsHex
+        self._tiles = []
+        if not raw:
+            return
+        # Each tile is 36 bytes = 72 hex characters
+        for i in range(0, len(raw), 72):
+            chunk = raw[i:i + 72]
+            if len(chunk) < 72:
+                break
+            tile = bytes.fromhex(chunk)
+            if tile == bytes(36):
+                break  # null tile = end of dictionary
+            self._tiles.append(tile)
+
+    # ── UI construction ──────────────────────────────────────────────────
+
+    def _buildUI(self):
+        from PySide6.QtWidgets import QScrollArea, QWidget, QGridLayout, QSplitter
+
+        mainLayout = QVBoxLayout(self)
+
+        # ── Top bar ──────────────────────────────────────────────────────
+        topRow = QHBoxLayout()
+        topRow.addWidget(QLabel(f"<b>{self._entryKey}</b>"))
+        topRow.addStretch()
+        self._tileCountLabel = QLabel(f"{len(self._tiles)} tiles")
+        topRow.addWidget(self._tileCountLabel)
+        mainLayout.addLayout(topRow)
+
+        # ── Splitter: grid on left, detail panel on right ────────────────
+        splitter = QSplitter(Qt.Horizontal)
+
+        gridScroll = QScrollArea()
+        gridScroll.setWidgetResizable(True)
+        gridWidget = QWidget()
+        self._gridLayout = QGridLayout(gridWidget)
+        self._gridLayout.setSpacing(2)
+        gridScroll.setWidget(gridWidget)
+        splitter.addWidget(gridScroll)
+
+        # Detail panel
+        detailWidget = QWidget()
+        detailWidget.setFixedWidth(220)
+        detailLayout = QVBoxLayout(detailWidget)
+
+        self._previewLabel = QLabel()
+        self._previewLabel.setFixedSize(120, 120)
+        self._previewLabel.setAlignment(Qt.AlignCenter)
+        self._previewLabel.setStyleSheet("border: 1px solid #555; background: black;")
+        detailLayout.addWidget(self._previewLabel, alignment=Qt.AlignCenter)
+
+        self._slotLabel = QLabel("Slot: \u2014")
+        detailLayout.addWidget(self._slotLabel)
+        self._hexLabel = QLabel("Tile hex: \u2014")
+        self._hexLabel.setWordWrap(True)
+        detailLayout.addWidget(self._hexLabel)
+
+        charRow = QHBoxLayout()
+        charRow.addWidget(QLabel("Char:"))
+        self._charEdit = QLineEdit()
+        self._charEdit.setMaxLength(2)
+        self._charEdit.setFixedWidth(60)
+        self._charEdit.setReadOnly(True)  # read-only for now; mapping comes from characters.py
+        charRow.addWidget(self._charEdit)
+        charRow.addStretch()
+        detailLayout.addLayout(charRow)
+
+        self.btnImportPng = QPushButton("Import PNG...")
+        self.btnImportPng.clicked.connect(self._importSinglePng)
+        detailLayout.addWidget(self.btnImportPng)
+        self.btnExportPng = QPushButton("Export PNG...")
+        self.btnExportPng.clicked.connect(self._exportSinglePng)
+        detailLayout.addWidget(self.btnExportPng)
+
+        detailLayout.addStretch()
+        splitter.addWidget(detailWidget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        mainLayout.addWidget(splitter)
+
+        # ── Bottom bar ───────────────────────────────────────────────────
+        bottomRow = QHBoxLayout()
+        btnExportAll = QPushButton("Export All Tiles...")
+        btnExportAll.clicked.connect(self._exportAll)
+        bottomRow.addWidget(btnExportAll)
+        btnImportFolder = QPushButton("Import Tiles from Folder...")
+        btnImportFolder.clicked.connect(self._importFolder)
+        bottomRow.addWidget(btnImportFolder)
+        bottomRow.addStretch()
+        btnBox = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btnBox.accepted.connect(self.accept)
+        btnBox.rejected.connect(self.reject)
+        bottomRow.addWidget(btnBox)
+        mainLayout.addLayout(bottomRow)
+
+    # ── Grid building / refresh ──────────────────────────────────────────
+
+    def _buildGrid(self):
+        from PySide6.QtCore import QSize
+
+        cellSize = 12 * self.SCALE + 8  # 56px
+
+        for btn in self._tileButtons:
+            btn.deleteLater()
+        self._tileButtons.clear()
+
+        for i in range(len(self._tiles)):
+            btn = QPushButton()
+            btn.setFixedSize(cellSize, cellSize)
+            btn.setToolTip(f"Tile {i}")
+            btn.clicked.connect(lambda checked=False, idx=i: self._selectSlot(idx))
+            row, col = divmod(i, self.COLS)
+            self._gridLayout.addWidget(btn, row, col)
+            self._tileButtons.append(btn)
+
+        self._tileCountLabel.setText(f"{len(self._tiles)} tiles")
+
+    def _refreshGrid(self):
+        from PySide6.QtGui import QPixmap, QIcon
+        from PySide6.QtCore import QSize
+
+        iconSize = 12 * self.SCALE
+        for i, btn in enumerate(self._tileButtons):
+            if i < len(self._tiles):
+                img = self._tileToQImage(self._tiles[i])
+                scaled = img.scaled(iconSize, iconSize, Qt.KeepAspectRatio, Qt.FastTransformation)
+                btn.setIcon(QIcon(QPixmap.fromImage(scaled)))
+                btn.setIconSize(QSize(iconSize, iconSize))
+
+            char = self._lookupChar(i)
+            btn.setToolTip(f"Tile {i}: {char}" if char else f"Tile {i}")
+
+            if i in self._modifiedSlots:
+                btn.setStyleSheet("border: 2px solid #44aaff;")
+            elif i == self._selectedSlot:
+                btn.setStyleSheet("border: 2px solid #ffaa00;")
+            else:
+                btn.setStyleSheet("")
+
+    def _tileToQImage(self, data: bytes, width: int = 12):
+        from PySide6.QtGui import QImage
+        height = self._MFT.GLYPH_HEIGHT
+        pixels = self._MFT.glyphToPixels(data, width, height)
+        img = QImage(width, height, QImage.Format_Grayscale8)
+        for y, row in enumerate(pixels):
+            for x, val in enumerate(row):
+                gray = self._MFT.PALETTE[val]
+                img.setPixelColor(x, y, QColor(gray, gray, gray))
+        return img
+
+    def _lookupChar(self, slot: int) -> str:
+        """Look up the Unicode character for a tile via characters.graphicsData."""
+        if slot < 0 or slot >= len(self._tiles):
+            return ""
+        hexStr = self._tiles[slot].hex()
+        return self._characters.graphicsData.get(hexStr, "")
+
+    # ── Slot selection ───────────────────────────────────────────────────
+
+    def _selectSlot(self, idx: int):
+        from PySide6.QtGui import QPixmap
+        self._selectedSlot = idx
+
+        char = self._lookupChar(idx)
+        self._slotLabel.setText(f"Slot: {idx}")
+        tileHex = self._tiles[idx].hex() if idx < len(self._tiles) else ""
+        # Show truncated hex to avoid overflowing the panel
+        displayHex = tileHex[:36] + "\u2026" if len(tileHex) > 36 else tileHex
+        self._hexLabel.setText(f"Tile hex: {displayHex}")
+        self._charEdit.setText(char)
+
+        if idx < len(self._tiles):
+            img = self._tileToQImage(self._tiles[idx])
+            scaled = img.scaled(120, 120, Qt.KeepAspectRatio, Qt.FastTransformation)
+            self._previewLabel.setPixmap(QPixmap.fromImage(scaled))
+
+        # Update grid highlights
+        for i, btn in enumerate(self._tileButtons):
+            if i == idx:
+                btn.setStyleSheet("border: 2px solid #ffaa00;")
+            elif i in self._modifiedSlots:
+                btn.setStyleSheet("border: 2px solid #44aaff;")
+            else:
+                btn.setStyleSheet("")
+
+    # ── Import / Export ──────────────────────────────────────────────────
+
+    def _importSinglePng(self):
+        if self._selectedSlot < 0 or self._selectedSlot >= len(self._tiles):
+            QMessageBox.information(self, "No Selection", "Select a tile slot first.")
+            return
+        path = QFileDialog.getOpenFileName(
+            self, "Import PNG", "", "PNG Files (*.png);;All Files (*)"
+        )[0]
+        if not path:
+            return
+        try:
+            newGlyph = self._MFT.pngToGlyph(path)
+            self._tiles[self._selectedSlot] = newGlyph
+            self._modifiedSlots.add(self._selectedSlot)
+            self._refreshGrid()
+            self._selectSlot(self._selectedSlot)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import PNG:\n{e}")
+
+    def _exportSinglePng(self):
+        if self._selectedSlot < 0 or self._selectedSlot >= len(self._tiles):
+            QMessageBox.information(self, "No Selection", "Select a tile slot first.")
+            return
+        defaultName = f"{self._entryKey}-tile-{self._selectedSlot:02d}.png"
+        path = QFileDialog.getSaveFileName(
+            self, "Export PNG", defaultName, "PNG Files (*.png)"
+        )[0]
+        if not path:
+            return
+        try:
+            self._MFT.glyphToPng(self._tiles[self._selectedSlot], path)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export PNG:\n{e}")
+
+    def _exportAll(self):
+        if not self._tiles:
+            QMessageBox.information(self, "No Data", "No tiles to export.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Export All Tiles To")
+        if not folder:
+            return
+        try:
+            for i, tile in enumerate(self._tiles):
+                self._MFT.glyphToPng(tile, os.path.join(folder, f"{self._entryKey}-tile-{i:02d}.png"))
+            QMessageBox.information(self, "Done", f"Exported {len(self._tiles)} tiles to:\n{folder}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to export tiles:\n{e}")
+
+    def _importFolder(self):
+        if not self._tiles:
+            QMessageBox.information(self, "No Data", "No tiles loaded to replace.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Import Tiles From Folder")
+        if not folder:
+            return
+        try:
+            imported = 0
+            for i in range(len(self._tiles)):
+                pngPath = os.path.join(folder, f"{self._entryKey}-tile-{i:02d}.png")
+                if os.path.isfile(pngPath):
+                    self._tiles[i] = self._MFT.pngToGlyph(pngPath)
+                    self._modifiedSlots.add(i)
+                    imported += 1
+            self._refreshGrid()
+            QMessageBox.information(self, "Done", f"Imported {imported} tiles.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to import tiles:\n{e}")
+
+
 class SubtitleTableWidget(QTableWidget):
     """Drop-in replacement for subsPreviewList.
     Displays subtitles as a table with Original and Edited columns.
@@ -1780,6 +2089,12 @@ class MainWindow(QMainWindow):
         self.actionFontEditor.triggered.connect(self._openFontEditor)
         toolsMenu.addAction(self.actionFontEditor)
 
+        self.actionCallDictEditor = QAction("Call Dictionary Editor...", self)
+        self.actionCallDictEditor.setStatusTip("View and edit per-entry custom character tiles")
+        self.actionCallDictEditor.setShortcut(QKeySequence("Ctrl+D"))
+        self.actionCallDictEditor.triggered.connect(self._openCallDictEditor)
+        toolsMenu.addAction(self.actionCallDictEditor)
+
         # ── Mode tab bar ───────────────────────────────────────────────────────
         from PySide6.QtWidgets import QToolBar, QTabBar
         self._modeToolBar = QToolBar("Editor Mode", self)
@@ -1877,6 +2192,12 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.clicked.connect(self._autoFormatLine)
         btnCol.addWidget(self.autoFormatButton)
 
+        self.callDictButton = QPushButton("Edit Dictionary")
+        self.callDictButton.setToolTip("Edit this entry's custom character tiles (Cmd+D)")
+        self.callDictButton.setEnabled(False)
+        self.callDictButton.clicked.connect(self._openCallDictEditor)
+        btnCol.addWidget(self.callDictButton)
+
         btnCol.addStretch()
 
         # ── Combine timing + buttons in a horizontal row ──────────────────
@@ -1922,6 +2243,14 @@ class MainWindow(QMainWindow):
         if not filename:
             return
         radioManager.loadRadioXmlFile(filename)
+        # Extract per-call graphics dictionaries from XML
+        global radioGraphicsJson
+        radioGraphicsJson = {}
+        if radioManager.radioXMLData is not None:
+            for call in radioManager.radioXMLData.findall(".//Call"):
+                gfxHex = call.get("graphicsBytes", "")
+                if gfxHex:
+                    radioGraphicsJson[call.get("offset")] = gfxHex
         self._buildRadioVoxIndex()
         self._populateRadioOffsets()
         if projectFilePath:
@@ -2348,6 +2677,7 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.setEnabled(True)
         self.splitSubButton.setEnabled(True)
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
+        self.callDictButton.setEnabled(self._editorMode in ("radio", "demo"))
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
 
@@ -2886,6 +3216,7 @@ class MainWindow(QMainWindow):
         self.deleteSubButton.setEnabled(False)
         self.translateButton.setEnabled(False)
         self.autoFormatButton.setEnabled(False)
+        self.callDictButton.setEnabled(False)
 
     # ── Audio ─────────────────────────────────────────────────────────────────
 
@@ -3237,8 +3568,20 @@ class MainWindow(QMainWindow):
             print(f"Warning: dialogue extraction failed: {e}")
             demoOriginalJson = {}
         demoAlteredJson = {}  # fresh load, no edits yet
+        # Extract per-entry graphics dictionaries from captionChunks
+        global demoGraphicsJson
+        demoGraphicsJson = {}
         sortedOffsets = sorted(demoManager.keys(), key=lambda k: int(k))
         demoSeqToOffset = {f"demo-{i + 1:02}": off for i, off in enumerate(sortedOffsets)}
+        for seqKey, off in demoSeqToOffset.items():
+            demoObj = demoManager.get(off)
+            if not demoObj:
+                continue
+            for seg in demoObj.segments:
+                gfx = getattr(seg, '_graphicsData', b'')
+                if gfx:
+                    demoGraphicsJson[seqKey] = gfx.hex()
+                    break  # one caption chunk per entry is enough
         # Build offsets.json for STAGE.DIR adjustment
         demoOffsetsJson = {}
         for name, off in demoSeqToOffset.items():
@@ -3494,6 +3837,18 @@ class MainWindow(QMainWindow):
 
     def _syncJsonToDemoManager(self):
         self._syncJsonToManager(demoAlteredJson, demoSeqToOffset, demoManager)
+        # Patch graphics data from demoGraphicsJson into captionChunks
+        for key, gfxHex in demoGraphicsJson.items():
+            offset = demoSeqToOffset.get(key)
+            if not offset:
+                continue
+            demo = demoManager.get(offset)
+            if demo is None:
+                continue
+            for seg in demo.segments:
+                if hasattr(seg, '_graphicsData'):
+                    seg._graphicsData = bytes.fromhex(gfxHex)
+                    break
 
     def _openFontEditor(self):
         """Open the Font Editor dialog."""
@@ -3511,6 +3866,44 @@ class MainWindow(QMainWindow):
         from scripts.fontTools import tblTools
         overrides = tblTools.tblToEncoderOverrides(activeTblMapping)
         RD.tblEncoderOverrides = overrides
+
+    def _openCallDictEditor(self):
+        """Open the Call Dictionary Editor for the current entry."""
+        global radioGraphicsJson, demoGraphicsJson
+        mode = self._editorMode
+
+        if mode == "radio":
+            # Get current call offset from the combo box
+            callOffset = self.ui.offsetListBox.currentData() or ""
+            if not callOffset:
+                QMessageBox.information(self, "No Selection", "Select a radio call first.")
+                return
+            gfxHex = radioGraphicsJson.get(callOffset, "")
+            dlg = CallDictEditorDialog(f"Call {callOffset}", gfxHex, parent=self)
+            if dlg.exec() == QDialog.Accepted and dlg.modified:
+                radioGraphicsJson[callOffset] = dlg.graphicsHex
+                # Also update the XML attribute
+                for call in radioManager.radioXMLData.findall(".//Call"):
+                    if call.get("offset") == callOffset:
+                        call.set("graphicsBytes", dlg.graphicsHex)
+                        break
+                self._modified = True
+
+        elif mode == "demo":
+            if not currentDemoKey:
+                QMessageBox.information(self, "No Selection", "Select a demo entry first.")
+                return
+            gfxHex = demoGraphicsJson.get(currentDemoKey, "")
+            dlg = CallDictEditorDialog(currentDemoKey, gfxHex, parent=self)
+            if dlg.exec() == QDialog.Accepted and dlg.modified:
+                demoGraphicsJson[currentDemoKey] = dlg.graphicsHex
+                self._modified = True
+
+        else:
+            QMessageBox.information(
+                self, "Not Available",
+                "Call Dictionary Editor is currently available for Radio and Demo modes only."
+            )
 
     def finalizeProject(self):
         """Batch-compile all (or selected) game data files."""
@@ -4251,9 +4644,15 @@ class MainWindow(QMainWindow):
                 xf.write(xmlStr)
 
             radioManager.loadRadioXmlFile(xmlPath)
-            global radioOriginalJson, radioAlteredJson
+            global radioOriginalJson, radioAlteredJson, radioGraphicsJson
             radioOriginalJson = _extractIseevaCallsFromXml(radioManager.radioXMLData)
             radioAlteredJson = {}
+            # Extract per-call graphics dictionaries from XML
+            radioGraphicsJson = {}
+            for call in radioManager.radioXMLData.findall(".//Call"):
+                gfxHex = call.get("graphicsBytes", "")
+                if gfxHex:
+                    radioGraphicsJson[call.get("offset")] = gfxHex
             self._buildRadioVoxIndex()
             self._populateRadioOffsets()
             if projectFilePath:
@@ -4428,6 +4827,12 @@ class MainWindow(QMainWindow):
             if zmovieAlteredJson:
                 zf.writestr('zmovie-altered.json',
                             json.dumps(zmovieAlteredJson, ensure_ascii=False, indent=2))
+            if radioGraphicsJson:
+                zf.writestr('radio-graphics.json',
+                            json.dumps(radioGraphicsJson, indent=2))
+            if demoGraphicsJson:
+                zf.writestr('demo-graphics.json',
+                            json.dumps(demoGraphicsJson, indent=2))
             if activeTblRaw:
                 zf.writestr('font.tbl', activeTblRaw)
 
@@ -4439,6 +4844,7 @@ class MainWindow(QMainWindow):
         global voxOriginalJson, voxAlteredJson, voxOffsetsJson, voxSeqToOffset
         global zmovieOriginalJson, zmovieAlteredJson
         global radioOriginalJson, radioAlteredJson
+        global radioGraphicsJson, demoGraphicsJson
         global activeTblMapping, activeTblRaw
 
         filename = QFileDialog.getOpenFileName(
@@ -4473,6 +4879,9 @@ class MainWindow(QMainWindow):
                 radioOrigJson = json.loads(zf.read('radio-original.json')) if 'radio-original.json' in names else {}
                 radioAltJson  = json.loads(zf.read('radio-altered.json'))  if 'radio-altered.json'  in names else {}
                 tblRaw      = zf.read('font.tbl').decode('utf-8')          if 'font.tbl'              in names else ""
+                # Graphics dictionaries
+                radioGfxJson = json.loads(zf.read('radio-graphics.json')) if 'radio-graphics.json' in names else {}
+                demoGfxJson  = json.loads(zf.read('demo-graphics.json'))  if 'demo-graphics.json'  in names else {}
         except Exception as e:
             QMessageBox.critical(self, "Open Failed", f"Could not read project file:\n{e}")
             return
@@ -4528,6 +4937,16 @@ class MainWindow(QMainWindow):
         elif zmLegacyJson:
             zmovieOriginalJson = _ensureJsonV2(zmLegacyJson)
             zmovieAlteredJson  = {}
+
+        # Restore graphics dictionaries
+        radioGraphicsJson = radioGfxJson
+        demoGraphicsJson  = demoGfxJson
+        # Migration: extract from XML/managers if no graphics JSON was stored
+        if not radioGraphicsJson and radioManager.radioXMLData is not None:
+            for call in radioManager.radioXMLData.findall(".//Call"):
+                gfxHex = call.get("graphicsBytes", "")
+                if gfxHex:
+                    radioGraphicsJson[call.get("offset")] = gfxHex
 
         # Restore font table overrides
         if tblRaw:

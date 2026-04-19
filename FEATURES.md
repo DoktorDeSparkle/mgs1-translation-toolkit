@@ -73,6 +73,14 @@
 - **Editor** — warn before revert toggle, show/hide index numbers toggle
 - **Build** — default output folder for Finalize Project
 
+### Call Dictionary Editor (Tools > Call Dictionary Editor)
+- **Per-entry tile viewer** — view the custom 12x12 graphics dictionary (36-byte tiles) for the currently selected Radio call or Demo entry
+- **Import/export tiles** — import single PNGs, export single PNGs, batch export all tiles, or batch import from a folder (`{entry}-tile-NN.png` naming)
+- **Character lookup** — displays the Unicode character mapped to each tile via `characters.graphicsData`
+- **Project integration** — modified graphics dictionaries saved as `radio-graphics.json` and `demo-graphics.json` in `.mtp` project files; old projects auto-migrate by extracting from XML/binary on open
+- **Compile integration** — Demo compile patches `captionChunk._graphicsData` from edited graphics; Radio edits write back to the XML `graphicsBytes` attribute (already used by the recompiler)
+- Currently supports Radio and Demo modes; VOX and ZMovie planned
+
 ### Font Editor (Tools > Font Editor)
 - **Extract glyphs** — load STAGE.DIR and view all 440 kana/kanji glyph slots (12x12 2bpp) in a scrollable grid
 - **Replace glyphs** — import single PNGs or batch-import from a folder (`glyph-NNN.png` naming convention)
@@ -101,7 +109,11 @@
 
 4. **ZMovie audio playback** — play the STR video stream alongside subtitle preview in ZMovie Mode, so timing edits can be verified against the actual FMV cutscene.
 
-5. **RADIO.DAT executable patcher for --long mode** — the Japanese version requires a binary patch to the game executable to support the `--long` RADIO.DAT format (extended call lengths). Need to integrate a patcher that identifies the game version by SHA-256 hash and applies the correct patch. Should support multiple disc versions (JP, Integral, etc.) as part of a larger packaging/distribution flow.
+5. **Remove standalone load methods** — `loadRadioXMLFile()`, `loadRadioDatFile()`, and individual DAT/STR load menu actions are vestigial now that Open Folder and Open Project are the primary entry points. Remove the dead code and simplify the File/menu structure.
+
+6. **Call Dictionary Editor: VOX and ZMovie support** — extend the Call Dictionary Editor to support VOX mode (same `captionChunk` pattern as Demo) and ZMovie mode (needs graphics extraction added to `extractZmovie.py`).
+
+7. **RADIO.DAT executable patcher for --long mode** — the Japanese version requires a binary patch to the game executable to support the `--long` RADIO.DAT format (extended call lengths). Need to integrate a patcher that identifies the game version by SHA-256 hash and applies the correct patch. Should support multiple disc versions (JP, Integral, etc.) as part of a larger packaging/distribution flow.
 
 ## Fixed Bugs
 
