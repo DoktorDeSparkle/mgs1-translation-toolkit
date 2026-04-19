@@ -1673,6 +1673,11 @@ class MainWindow(QMainWindow):
         self.actionSaveProjectAs.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_S))
         self.actionSaveProjectAs.triggered.connect(self.saveProjectAs)
 
+        self.actionCloseProject = QAction("Close Project", self)
+        self.actionCloseProject.setStatusTip("Close the current project and reset to initial state")
+        self.actionCloseProject.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_W))
+        self.actionCloseProject.triggered.connect(self.closeProject)
+
         self.actionFinalizeProject = QAction("Finalize Project...", self)
         self.actionFinalizeProject.setStatusTip("Batch-compile all game data files")
         self.actionFinalizeProject.triggered.connect(self.finalizeProject)
@@ -1686,6 +1691,7 @@ class MainWindow(QMainWindow):
         self.ui.menuFile.addSeparator()
         self.ui.menuFile.addAction(self.actionSaveProject)
         self.ui.menuFile.addAction(self.actionSaveProjectAs)
+        self.ui.menuFile.addAction(self.actionCloseProject)
         self.ui.menuFile.addSeparator()
         self.ui.menuFile.addAction(self.actionFinalizeProject)
         self.ui.menuFile.addSeparator()
@@ -1719,21 +1725,18 @@ class MainWindow(QMainWindow):
         self.btnEditPrompts = QPushButton("Edit Prompts...")
         self.btnEditPrompts.setToolTip("Edit save prompts (ASK_USER)")
         self.btnEditPrompts.setEnabled(False)
-        self.btnEditPrompts.setVisible(False)
         self.btnEditPrompts.clicked.connect(lambda: self._openStaticFieldsDialog(0))
         self.ui.verticalLayout_4.insertWidget(quitIdx + 4, self.btnEditPrompts)
 
         self.btnEditSaveLocations = QPushButton("Edit Save Locations...")
         self.btnEditSaveLocations.setToolTip("Edit save location names (MEM_SAVE)")
         self.btnEditSaveLocations.setEnabled(False)
-        self.btnEditSaveLocations.setVisible(False)
         self.btnEditSaveLocations.clicked.connect(lambda: self._openStaticFieldsDialog(1))
         self.ui.verticalLayout_4.insertWidget(quitIdx + 5, self.btnEditSaveLocations)
 
         self.btnEditContactNames = QPushButton("Edit Contact Names...")
         self.btnEditContactNames.setToolTip("Edit codec contact names (ADD_FREQ)")
         self.btnEditContactNames.setEnabled(False)
-        self.btnEditContactNames.setVisible(False)
         self.btnEditContactNames.clicked.connect(lambda: self._openStaticFieldsDialog(2))
         self.ui.verticalLayout_4.insertWidget(quitIdx + 6, self.btnEditContactNames)
 
@@ -2174,13 +2177,14 @@ class MainWindow(QMainWindow):
             self.ui.subsPreviewList.clear()
             callOffset = radioManager.workingCall.get("offset")
             # For direct subs, vox key = call offset
-            voxSubs = _getRadioVoxSubs(callOffset, callOffset)
+            origSubs = radioOriginalJson.get(callOffset, {}).get(callOffset, {})
+            altSubs = radioAlteredJson.get(callOffset, {}).get(callOffset, {})
             for i, sub in enumerate(radioManager.workingCall.findall("SUBTITLE")):
                 subOffset = sub.get("offset")
-                original = sub.get("text", "")
-                edited = voxSubs.get(subOffset, "")
+                original = origSubs.get(subOffset, sub.get("text", ""))
+                edited = altSubs.get(subOffset, "")
                 self.ui.subsPreviewList.addSubtitleRow(
-                    i, original, editedText=edited if edited != original else "")
+                    i, original, editedText=edited)
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
 
@@ -2280,13 +2284,14 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         callOffset = radioManager.workingCall.get("offset")
         voxOffset = radioManager.workingVox.get("offset")
-        voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+        origSubs = radioOriginalJson.get(callOffset, {}).get(voxOffset, {})
+        altSubs = radioAlteredJson.get(callOffset, {}).get(voxOffset, {})
         for i, sub in enumerate(radioManager.workingVox.findall("SUBTITLE")):
             subOffset = sub.get("offset")
-            original = sub.get("text", "")
-            edited = voxSubs.get(subOffset, "")
+            original = origSubs.get(subOffset, sub.get("text", ""))
+            edited = altSubs.get(subOffset, "")
             self.ui.subsPreviewList.addSubtitleRow(
-                i, original, editedText=edited if edited != original else "")
+                i, original, editedText=edited)
 
         self._clearEditor()
         if self.ui.subsPreviewList.count() > 0:
@@ -2859,13 +2864,14 @@ class MainWindow(QMainWindow):
         else:
             callOffset = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
             voxOffset = self._radioVoxKey() if callOffset else None
-            voxSubs = _getRadioVoxSubs(callOffset, voxOffset) if callOffset and voxOffset else {}
+            origSubs = radioOriginalJson.get(callOffset, {}).get(voxOffset, {}) if callOffset and voxOffset else {}
+            altSubs = radioAlteredJson.get(callOffset, {}).get(voxOffset, {}) if callOffset and voxOffset else {}
             for i, sub in enumerate(self._radioSubtitleElems()):
                 subOffset = sub.get("offset")
-                original = sub.get("text", "")
-                edited = voxSubs.get(subOffset, "")
+                original = origSubs.get(subOffset, sub.get("text", ""))
+                edited = altSubs.get(subOffset, "")
                 self.ui.subsPreviewList.addSubtitleRow(
-                    i, original, editedText=edited if edited != original else "")
+                    i, original, editedText=edited)
 
     def _clearEditor(self):
         """Reset the editor panel."""
@@ -4289,6 +4295,101 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Save Error", str(e))
 
+    def closeProject(self):
+        """Close the current project and reset all state to initial values."""
+        global radioManager, projectFilePath, projectSettings
+        global voxManager, voxOriginalData, voxFilePath
+        global demoManager, demoOriginalData, demoFilePath, currentDemoKey, currentVoxKey
+        global demoOriginalJson, demoAlteredJson, demoOffsetsJson, demoSeqToOffset
+        global voxOriginalJson, voxAlteredJson, voxOffsetsJson, voxSeqToOffset
+        global zmovieOriginalJson, zmovieAlteredJson, zmovieOriginalData, zmovieFilePath, currentZmovieKey
+        global radioOriginalJson, radioAlteredJson
+        global currentSubIndex, currentVoxOffset
+        global activeTblMapping, activeTblRaw
+
+        if self._modified:
+            reply = QMessageBox.question(
+                self, "Unsaved Changes",
+                "You have unsaved changes. Close anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # Reset radio state
+        radioManager = RDE()
+        radioOriginalJson = {}
+        radioAlteredJson  = {}
+
+        # Reset VOX state
+        voxManager = {}
+        voxOriginalData = b''
+        voxFilePath = ""
+        voxOriginalJson = {}
+        voxAlteredJson  = {}
+        voxOffsetsJson  = {}
+        voxSeqToOffset  = {}
+
+        # Reset Demo state
+        demoManager = {}
+        demoOriginalData = b''
+        demoFilePath = ""
+        currentDemoKey = ""
+        currentVoxKey  = ""
+        demoOriginalJson = {}
+        demoAlteredJson  = {}
+        demoOffsetsJson  = {}
+        demoSeqToOffset  = {}
+
+        # Reset ZMovie state
+        zmovieOriginalJson = {}
+        zmovieAlteredJson  = {}
+        zmovieOriginalData = b''
+        zmovieFilePath = ""
+        currentZmovieKey = ""
+
+        # Reset cursor state
+        currentSubIndex = -1
+        currentVoxOffset = ""
+
+        # Reset font table overrides
+        activeTblMapping = {}
+        activeTblRaw = ""
+        try:
+            import scripts.translation.radioDict as RD
+            RD.tblEncoderOverrides = {}
+        except Exception:
+            pass
+
+        # Reset project identity
+        projectFilePath = ""
+        projectSettings = {}
+        self._modified = False
+
+        # Clear UI widgets
+        self.ui.offsetListBox.clear()
+        self.ui.audioCueListView.clear()
+        self.ui.subsPreviewList.clear()
+        self.ui.FreqDisplay.display(0)
+        self.ui.VoxAddressDisplay.setText("")
+        self.ui.VoxBlockAddressDisplay.setText("")
+        self._clearEditor()
+        self.revertVoxButton.setVisible(False)
+
+        # Disable radio-specific edit buttons (no XML loaded)
+        self.btnEditPrompts.setEnabled(False)
+        self.btnEditSaveLocations.setEnabled(False)
+        self.btnEditContactNames.setEnabled(False)
+
+        # Disable Save Project until a new project is opened/created
+        self.actionSaveProject.setEnabled(False)
+
+        # Return to radio mode (default)
+        self._switchToRadioMode()
+
+        self.setWindowTitle("Dialogue Editor")
+        self.statusBar().showMessage("Project closed.", 3000)
+
     def _writeProjectFile(self, path: str):
         import xml.etree.ElementTree as ET
         from xml.dom.minidom import parseString
@@ -4398,7 +4499,7 @@ class MainWindow(QMainWindow):
         elif radioXml and radioManager.radioXMLData is not None:
             # Migration: old .mtp with radio.xml but no iseeva JSONs
             radioOriginalJson = _extractIseevaCallsFromXml(radioManager.radioXMLData)
-            radioAlteredJson = {}
+            radioAlteredJson = radioAltJson  # preserve any loaded alterations
 
         # Restore demo/vox subtitle JSON (auto-convert v1 → v2 if needed)
         if demoOrigJson:
