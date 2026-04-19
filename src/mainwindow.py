@@ -1452,7 +1452,6 @@ class CallDictEditorDialog(QDialog):
     lets the user import/export PNGs, and edit the character mapping.
     """
 
-    COLS  = 16    # grid columns
     SCALE = 4     # display scale (12px -> 48px)
 
     def __init__(self, entryKey: str, graphicsHex: str, parent=None):
@@ -1471,6 +1470,7 @@ class CallDictEditorDialog(QDialog):
         self._tileButtons: list[QPushButton] = []
         self._modifiedSlots: set[int] = set()
         self._selectedSlot: int = -1
+        self._currentCols: int = 0  # recalculated on resize
 
         self._parseTiles()
         self._buildUI()
@@ -1514,29 +1514,26 @@ class CallDictEditorDialog(QDialog):
 
         mainLayout = QVBoxLayout(self)
 
-        # ── Top bar ──────────────────────────────────────────────────────
-        topRow = QHBoxLayout()
-        topRow.addWidget(QLabel(f"<b>{self._entryKey}</b>"))
-        topRow.addStretch()
-        self._tileCountLabel = QLabel(f"{len(self._tiles)} tiles")
-        topRow.addWidget(self._tileCountLabel)
-        mainLayout.addLayout(topRow)
-
         # ── Splitter: grid on left, detail panel on right ────────────────
         splitter = QSplitter(Qt.Horizontal)
 
-        gridScroll = QScrollArea()
-        gridScroll.setWidgetResizable(True)
+        self._gridScroll = QScrollArea()
+        self._gridScroll.setWidgetResizable(True)
         gridWidget = QWidget()
         self._gridLayout = QGridLayout(gridWidget)
-        self._gridLayout.setSpacing(2)
-        gridScroll.setWidget(gridWidget)
-        splitter.addWidget(gridScroll)
+        self._gridLayout.setHorizontalSpacing(2)
+        self._gridLayout.setVerticalSpacing(8)
+        self._gridScroll.setWidget(gridWidget)
+        splitter.addWidget(self._gridScroll)
 
         # Detail panel
         detailWidget = QWidget()
         detailWidget.setFixedWidth(220)
         detailLayout = QVBoxLayout(detailWidget)
+
+        detailLayout.addWidget(QLabel(f"<b>{self._entryKey}</b>"))
+        self._tileCountLabel = QLabel(f"{len(self._tiles)} tiles")
+        detailLayout.addWidget(self._tileCountLabel)
 
         self._previewLabel = QLabel()
         self._previewLabel.setFixedSize(120, 120)
@@ -1546,6 +1543,8 @@ class CallDictEditorDialog(QDialog):
 
         self._slotLabel = QLabel("Slot: \u2014")
         detailLayout.addWidget(self._slotLabel)
+        self._invokeLabel = QLabel("Invoke: \u2014")
+        detailLayout.addWidget(self._invokeLabel)
         self._hexLabel = QLabel("Tile hex: \u2014")
         self._hexLabel.setWordWrap(True)
         detailLayout.addWidget(self._hexLabel)
@@ -1590,25 +1589,50 @@ class CallDictEditorDialog(QDialog):
 
     # ── Grid building / refresh ──────────────────────────────────────────
 
-    def _buildGrid(self):
-        from PySide6.QtCore import QSize
+    _CELL_SIZE = 12 * 4 + 8  # 56px per button
 
-        cellSize = 12 * self.SCALE + 8  # 56px
+    def _calcCols(self) -> int:
+        """Calculate how many tile columns fit in the grid scroll area viewport."""
+        vw = self._gridScroll.viewport().width()
+        hSpacing = self._gridLayout.horizontalSpacing()
+        cols = max(1, (vw + hSpacing) // (self._CELL_SIZE + hSpacing))
+        return cols
+
+    def _buildGrid(self):
+        cellSize = self._CELL_SIZE
 
         for btn in self._tileButtons:
             btn.deleteLater()
         self._tileButtons.clear()
+
+        cols = self._calcCols()
+        self._currentCols = cols
 
         for i in range(len(self._tiles)):
             btn = QPushButton()
             btn.setFixedSize(cellSize, cellSize)
             btn.setToolTip(f"Tile {i}")
             btn.clicked.connect(lambda checked=False, idx=i: self._selectSlot(idx))
-            row, col = divmod(i, self.COLS)
+            row, col = divmod(i, cols)
             self._gridLayout.addWidget(btn, row, col)
             self._tileButtons.append(btn)
 
         self._tileCountLabel.setText(f"{len(self._tiles)} tiles")
+
+    def _relayoutGrid(self):
+        """Re-position existing buttons when column count changes on resize."""
+        cols = self._calcCols()
+        if cols == self._currentCols:
+            return
+        self._currentCols = cols
+        for i, btn in enumerate(self._tileButtons):
+            row, col = divmod(i, cols)
+            self._gridLayout.addWidget(btn, row, col)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._tileButtons:
+            self._relayoutGrid()
 
     def _refreshGrid(self):
         from PySide6.QtGui import QPixmap, QIcon
@@ -1623,7 +1647,8 @@ class CallDictEditorDialog(QDialog):
                 btn.setIconSize(QSize(iconSize, iconSize))
 
             char = self._lookupChar(i)
-            btn.setToolTip(f"Tile {i}: {char}" if char else f"Tile {i}")
+            invoke = self._invokeHex(i)
+            btn.setToolTip(f"Tile {i} ({invoke}): {char}" if char else f"Tile {i} ({invoke})")
 
             if i in self._modifiedSlots:
                 btn.setStyleSheet("border: 2px solid #44aaff;")
@@ -1650,6 +1675,18 @@ class CallDictEditorDialog(QDialog):
         hexStr = self._tiles[slot].hex()
         return self._characters.graphicsData.get(hexStr, "")
 
+    @staticmethod
+    def _invokeHex(slot: int) -> str:
+        """Return the 2-byte hex code used to reference this tile in subtitle text.
+        Slot 0 → index 1.  0x96 XX for 1-254, 0x97 XX for 255-508, 0x98 XX for 509+."""
+        index = slot + 1
+        if index > 508:
+            return f"0x98{index - 508:02X}"
+        elif index > 254:
+            return f"0x97{index - 254:02X}"
+        else:
+            return f"0x96{index:02X}"
+
     # ── Slot selection ───────────────────────────────────────────────────
 
     def _selectSlot(self, idx: int):
@@ -1658,6 +1695,7 @@ class CallDictEditorDialog(QDialog):
 
         char = self._lookupChar(idx)
         self._slotLabel.setText(f"Slot: {idx}")
+        self._invokeLabel.setText(f"Invoke: {self._invokeHex(idx)}")
         tileHex = self._tiles[idx].hex() if idx < len(self._tiles) else ""
         # Show truncated hex to avoid overflowing the panel
         displayHex = tileHex[:36] + "\u2026" if len(tileHex) > 36 else tileHex
