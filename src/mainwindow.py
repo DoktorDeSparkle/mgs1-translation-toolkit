@@ -65,6 +65,7 @@ currentZmovieKey:   str   = ""   # e.g. "zmovie-00"
 # Graphics dictionary state (per-entry custom 12x12 tiles)
 radioGraphicsJson: dict = {}   # {"call-offset": "hex-of-36-byte-tiles", ...}
 demoGraphicsJson:  dict = {}   # {"demo-01": "hex-of-36-byte-tiles", ...}
+voxGraphicsJson:   dict = {}   # {"vox-0001": "hex-of-36-byte-tiles", ...}
 
 def _mergedZmovieJson() -> dict:
     """Return zmovieOriginalJson with zmovieAlteredJson overlaid (altered takes priority)."""
@@ -1953,6 +1954,11 @@ class MainWindow(QMainWindow):
         self.btnNextEntry.clicked.connect(lambda: self._navigateEntry(1))
         rightCol.addWidget(self.btnPrevEntry)
         rightCol.addWidget(self.btnNextEntry)
+        self.callDictButton = QPushButton("Edit Dictionary")
+        self.callDictButton.setToolTip("Edit this entry's custom character tiles (Cmd+D)")
+        self.callDictButton.setEnabled(False)
+        self.callDictButton.clicked.connect(self._openCallDictEditor)
+        rightCol.addWidget(self.callDictButton)
         rightCol.addStretch()
         offsetRow.addLayout(rightCol, stretch=1)
 
@@ -2230,12 +2236,6 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.clicked.connect(self._autoFormatLine)
         btnCol.addWidget(self.autoFormatButton)
 
-        self.callDictButton = QPushButton("Edit Dictionary")
-        self.callDictButton.setToolTip("Edit this entry's custom character tiles (Cmd+D)")
-        self.callDictButton.setEnabled(False)
-        self.callDictButton.clicked.connect(self._openCallDictEditor)
-        btnCol.addWidget(self.callDictButton)
-
         btnCol.addStretch()
 
         # ── Combine timing + buttons in a horizontal row ──────────────────
@@ -2392,11 +2392,26 @@ class MainWindow(QMainWindow):
             from DemoTools.extractDemoVox import extractFromFile
             voxOriginalJson = extractFromFile(voxFile, fileType='vox')
         except Exception as e:
-            print(f"Warning: VOX dialogue extraction failed: {e}")
-            voxOriginalJson = {}
+            print(f"Warning: extractFromFile failed ({e}), extracting from parsed manager")
+            voxOriginalJson = self._extractJsonFromManager(voxManager, "vox")
         voxAlteredJson = {}  # fresh load, no edits yet
+        # Extract per-entry graphics dictionaries from captionChunks
+        global voxGraphicsJson
+        voxGraphicsJson = {}
         sortedOffsets = sorted(voxManager.keys(), key=lambda k: int(k))
         voxSeqToOffset = {f"vox-{i + 1:04}": off for i, off in enumerate(sortedOffsets)}
+        try:
+            for seqKey, off in voxSeqToOffset.items():
+                voxObj = voxManager.get(off)
+                if not voxObj:
+                    continue
+                for seg in voxObj.segments:
+                    gfx = getattr(seg, '_graphicsData', b'')
+                    if gfx:
+                        voxGraphicsJson[seqKey] = gfx.hex()
+                        break
+        except Exception as e:
+            print(f"Warning: VOX graphics extraction failed: {e}")
         # Build offsets.json for STAGE.DIR adjustment
         voxOffsetsJson = {}
         for name, off in voxSeqToOffset.items():
@@ -2715,7 +2730,7 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.setEnabled(True)
         self.splitSubButton.setEnabled(True)
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
-        self.callDictButton.setEnabled(self._editorMode in ("radio", "demo"))
+        self.callDictButton.setEnabled(self._editorMode in ("radio", "demo", "vox"))
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
 
@@ -3603,23 +3618,26 @@ class MainWindow(QMainWindow):
             from DemoTools.extractDemoVox import extractFromFile
             demoOriginalJson = extractFromFile(demoFile, fileType="demo")
         except Exception as e:
-            print(f"Warning: dialogue extraction failed: {e}")
-            demoOriginalJson = {}
+            print(f"Warning: extractFromFile failed ({e}), extracting from parsed manager")
+            demoOriginalJson = self._extractJsonFromManager(demoManager, "demo")
         demoAlteredJson = {}  # fresh load, no edits yet
         # Extract per-entry graphics dictionaries from captionChunks
         global demoGraphicsJson
         demoGraphicsJson = {}
         sortedOffsets = sorted(demoManager.keys(), key=lambda k: int(k))
         demoSeqToOffset = {f"demo-{i + 1:02}": off for i, off in enumerate(sortedOffsets)}
-        for seqKey, off in demoSeqToOffset.items():
-            demoObj = demoManager.get(off)
-            if not demoObj:
-                continue
-            for seg in demoObj.segments:
-                gfx = getattr(seg, '_graphicsData', b'')
-                if gfx:
-                    demoGraphicsJson[seqKey] = gfx.hex()
-                    break  # one caption chunk per entry is enough
+        try:
+            for seqKey, off in demoSeqToOffset.items():
+                demoObj = demoManager.get(off)
+                if not demoObj:
+                    continue
+                for seg in demoObj.segments:
+                    gfx = getattr(seg, '_graphicsData', b'')
+                    if gfx:
+                        demoGraphicsJson[seqKey] = gfx.hex()
+                        break
+        except Exception as e:
+            print(f"Warning: demo graphics extraction failed: {e}")
         # Build offsets.json for STAGE.DIR adjustment
         demoOffsetsJson = {}
         for name, off in demoSeqToOffset.items():
@@ -3805,6 +3823,18 @@ class MainWindow(QMainWindow):
         try:
             # Only sync altered entries — unchanged entries stay pristine
             self._syncJsonToManager(voxAlteredJson, voxSeqToOffset, voxManager)
+            # Patch graphics data from voxGraphicsJson into captionChunks
+            for key, gfxHex in voxGraphicsJson.items():
+                offset = voxSeqToOffset.get(key)
+                if not offset:
+                    continue
+                vox = voxManager.get(offset)
+                if vox is None:
+                    continue
+                for seg in vox.segments:
+                    if hasattr(seg, '_graphicsData'):
+                        seg._graphicsData = bytes.fromhex(gfxHex)
+                        break
             # Build set of altered byte offsets so we only patch those
             alteredOffsets = set()
             for key in voxAlteredJson:
@@ -3839,6 +3869,28 @@ class MainWindow(QMainWindow):
                 f"VOX.DAT compiled ({len(alteredOffsets)} entries patched): {filename}", 5000)
         except Exception as e:
             QMessageBox.critical(self, "Compile Error", str(e))
+
+    @staticmethod
+    def _extractJsonFromManager(manager: dict, prefix: str) -> dict:
+        """Fallback: extract dialogue JSON from an already-parsed demo/vox manager.
+        Produces the same format as DemoTools.extractDemoVox.extractFromFile."""
+        sortedOffsets = sorted(manager.keys(), key=lambda k: int(k))
+        result = {}
+        for i, off in enumerate(sortedOffsets):
+            key = f"demo-{i + 1:02}" if prefix == "demo" else f"vox-{i + 1:04}"
+            demo = manager[off]
+            subs = {}
+            for seg in demo.segments:
+                if hasattr(seg, 'subtitles'):
+                    for sub in seg.subtitles:
+                        text = sub.text.replace('\x00', '')
+                        subs[str(sub.startFrame)] = {
+                            "duration": str(sub.displayFrames),
+                            "text": text,
+                        }
+            if subs:
+                result[key] = subs
+        return result
 
     def _syncJsonToManager(self, dialogueJson: dict, seqToOffset: dict, manager: dict):
         """Sync dialogue JSON edits into binary demo objects before patch-in-place compile."""
@@ -3907,11 +3959,10 @@ class MainWindow(QMainWindow):
 
     def _openCallDictEditor(self):
         """Open the Call Dictionary Editor for the current entry."""
-        global radioGraphicsJson, demoGraphicsJson
+        global radioGraphicsJson, demoGraphicsJson, voxGraphicsJson
         mode = self._editorMode
 
         if mode == "radio":
-            # Get current call offset from the combo box
             callOffset = self.ui.offsetListBox.currentData() or ""
             if not callOffset:
                 QMessageBox.information(self, "No Selection", "Select a radio call first.")
@@ -3920,7 +3971,6 @@ class MainWindow(QMainWindow):
             dlg = CallDictEditorDialog(f"Call {callOffset}", gfxHex, parent=self)
             if dlg.exec() == QDialog.Accepted and dlg.modified:
                 radioGraphicsJson[callOffset] = dlg.graphicsHex
-                # Also update the XML attribute
                 for call in radioManager.radioXMLData.findall(".//Call"):
                     if call.get("offset") == callOffset:
                         call.set("graphicsBytes", dlg.graphicsHex)
@@ -3937,10 +3987,20 @@ class MainWindow(QMainWindow):
                 demoGraphicsJson[currentDemoKey] = dlg.graphicsHex
                 self._modified = True
 
+        elif mode == "vox":
+            if not currentVoxKey:
+                QMessageBox.information(self, "No Selection", "Select a VOX entry first.")
+                return
+            gfxHex = voxGraphicsJson.get(currentVoxKey, "")
+            dlg = CallDictEditorDialog(currentVoxKey, gfxHex, parent=self)
+            if dlg.exec() == QDialog.Accepted and dlg.modified:
+                voxGraphicsJson[currentVoxKey] = dlg.graphicsHex
+                self._modified = True
+
         else:
             QMessageBox.information(
                 self, "Not Available",
-                "Call Dictionary Editor is currently available for Radio and Demo modes only."
+                "Call Dictionary Editor is currently available for Radio, Demo, and VOX modes."
             )
 
     def finalizeProject(self):
@@ -4871,6 +4931,9 @@ class MainWindow(QMainWindow):
             if demoGraphicsJson:
                 zf.writestr('demo-graphics.json',
                             json.dumps(demoGraphicsJson, indent=2))
+            if voxGraphicsJson:
+                zf.writestr('vox-graphics.json',
+                            json.dumps(voxGraphicsJson, indent=2))
             if activeTblRaw:
                 zf.writestr('font.tbl', activeTblRaw)
 
@@ -4882,7 +4945,7 @@ class MainWindow(QMainWindow):
         global voxOriginalJson, voxAlteredJson, voxOffsetsJson, voxSeqToOffset
         global zmovieOriginalJson, zmovieAlteredJson
         global radioOriginalJson, radioAlteredJson
-        global radioGraphicsJson, demoGraphicsJson
+        global radioGraphicsJson, demoGraphicsJson, voxGraphicsJson
         global activeTblMapping, activeTblRaw
 
         filename = QFileDialog.getOpenFileName(
@@ -4920,6 +4983,7 @@ class MainWindow(QMainWindow):
                 # Graphics dictionaries
                 radioGfxJson = json.loads(zf.read('radio-graphics.json')) if 'radio-graphics.json' in names else {}
                 demoGfxJson  = json.loads(zf.read('demo-graphics.json'))  if 'demo-graphics.json'  in names else {}
+                voxGfxJson   = json.loads(zf.read('vox-graphics.json'))   if 'vox-graphics.json'   in names else {}
         except Exception as e:
             QMessageBox.critical(self, "Open Failed", f"Could not read project file:\n{e}")
             return
@@ -4979,6 +5043,7 @@ class MainWindow(QMainWindow):
         # Restore graphics dictionaries
         radioGraphicsJson = radioGfxJson
         demoGraphicsJson  = demoGfxJson
+        voxGraphicsJson   = voxGfxJson
         # Migration: extract from XML/managers if no graphics JSON was stored
         if not radioGraphicsJson and radioManager.radioXMLData is not None:
             for call in radioManager.radioXMLData.findall(".//Call"):
