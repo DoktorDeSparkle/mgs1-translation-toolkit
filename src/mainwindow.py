@@ -371,6 +371,45 @@ class ZmovieConversionThread(QThread):
             self.errorOccurred.emit(str(e))
 
 
+class AutoTranslateThread(QThread):
+    """Translates a list of subtitle texts off the main thread.
+    Emits lineTranslated(index, translatedText) for each completed line,
+    and finished() when all lines are done."""
+    lineTranslated = Signal(int, str)  # (subtitle index, translated text)
+    errorOccurred  = Signal(str)
+
+    def __init__(self, texts: list, srcLang: str, tgtLang: str, parent=None):
+        super().__init__(parent)
+        self._texts = texts
+        self._srcLang = srcLang
+        self._tgtLang = tgtLang
+
+    def run(self):
+        try:
+            from deep_translator import GoogleTranslator
+        except ImportError:
+            self.errorOccurred.emit(
+                "Install deep_translator to use translation:\n\n"
+                "  pip install deep-translator")
+            return
+        translator = GoogleTranslator(source=self._srcLang, target=self._tgtLang)
+        for i, text in enumerate(self._texts):
+            if self.isInterruptionRequested():
+                return
+            if not text.strip():
+                self.lineTranslated.emit(i, "")
+                continue
+            # Strip line-break markers that confuse the translator
+            clean = text.replace("\\r\\n", " ").replace("｜", " ").replace("\n", " ")
+            clean = " ".join(clean.split())
+            try:
+                result = translator.translate(clean)
+                self.lineTranslated.emit(i, result or "")
+            except Exception as e:
+                self.errorOccurred.emit(f"Translation failed on subtitle {i}: {e}")
+                return
+
+
 from PySide6.QtWidgets import QListWidget as _QListWidget
 
 class OffsetListWidget(_QListWidget):
@@ -2009,6 +2048,13 @@ class MainWindow(QMainWindow):
         self.callDictButton.setEnabled(False)
         self.callDictButton.clicked.connect(self._openCallDictEditor)
         rightCol.addWidget(self.callDictButton)
+        self.autoTranslateButton = QPushButton("Auto-translate")
+        self.autoTranslateButton.setToolTip(
+            "Translate, auto-format, and apply all subtitles\n"
+            "in the current entry using Preferences language settings")
+        self.autoTranslateButton.setEnabled(False)
+        self.autoTranslateButton.clicked.connect(self._autoTranslateAll)
+        rightCol.addWidget(self.autoTranslateButton)
         rightCol.addStretch()
         offsetRow.addLayout(rightCol, stretch=1)
 
@@ -2675,6 +2721,8 @@ class MainWindow(QMainWindow):
     def _populateAllCallSubtitles(self):
         """Show every subtitle from all VOX cues in the current call at once."""
         self.ui.subsPreviewList.clear()
+        # Build a flat index mapping row → (voxOffset, subtitleElement)
+        self._allCallSubs: list[tuple[str, object]] = []
         callOffset = radioManager.workingCall.get("offset")
         if not callOffset:
             return
@@ -2690,6 +2738,7 @@ class MainWindow(QMainWindow):
                 edited = altSubs.get(subOffset, "")
                 self.ui.subsPreviewList.addSubtitleRow(
                     i, original, editedText=edited)
+                self._allCallSubs.append((voxOffset, sub))
                 i += 1
         # Also include direct subtitles (calls with no VOX_CUES)
         if not radioManager.workingCall.findall(".//VOX_CUES"):
@@ -2701,6 +2750,7 @@ class MainWindow(QMainWindow):
                 edited = altSubs.get(subOffset, "")
                 self.ui.subsPreviewList.addSubtitleRow(
                     i, original, editedText=edited)
+                self._allCallSubs.append((callOffset, sub))
                 i += 1
         if self.ui.subsPreviewList.count() > 0:
             self.ui.subsPreviewList.setCurrentRow(0)
@@ -2839,6 +2889,19 @@ class MainWindow(QMainWindow):
                 self.ui.DialogueEditorBox.clear()
                 self.ui.startFrameBox.setValue(0)
                 self.ui.durationBox.setValue(0)
+        elif self.chkSkipVoxSort.isChecked() and hasattr(self, '_allCallSubs'):
+            # Skip-vox-sort mode: use the flat index across all VOX cues
+            if idx >= len(self._allCallSubs):
+                return
+            voxOffset, subElem = self._allCallSubs[idx]
+            subOffset = subElem.get("offset")
+            callOffset = radioManager.workingCall.get("offset")
+            voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+            text = voxSubs.get(subOffset, subElem.get("text", ""))
+            text = text.replace("\\r\\n", "\n")
+            self.ui.DialogueEditorBox.setText(text)
+            self.ui.startFrameBox.setValue(0)
+            self.ui.durationBox.setValue(0)
         else:
             # Populate text editor from iseeva JSON
             subElems = self._radioSubtitleElems()
@@ -2866,6 +2929,7 @@ class MainWindow(QMainWindow):
         self.splitSubButton.setEnabled(True)
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
         self.callDictButton.setEnabled(self._editorMode in ("radio", "demo", "vox"))
+        self.autoTranslateButton.setEnabled(True)
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
 
@@ -2961,29 +3025,44 @@ class MainWindow(QMainWindow):
         # --- Text → iseeva JSON (copy-on-write) --------------------------------
         newText = self.ui.DialogueEditorBox.toPlainText().replace("\n", "\\r\\n")
         callOffset = radioManager.workingCall.get("offset")
-        voxOffset = self._radioVoxKey()
-        subElems = self._radioSubtitleElems()
-        if savedIdx < len(subElems):
-            subOffset = subElems[savedIdx].get("offset")
-            if callOffset not in radioAlteredJson:
-                radioAlteredJson[callOffset] = {}
-            if voxOffset not in radioAlteredJson[callOffset]:
-                radioAlteredJson[callOffset][voxOffset] = {}
-            radioAlteredJson[callOffset][voxOffset][subOffset] = newText
 
-        # --- Sync text to VOX altered JSON --------------------------------------
-        self._syncRadioEditToVox(savedIdx, newText)
+        if self.chkSkipVoxSort.isChecked() and hasattr(self, '_allCallSubs'):
+            # Skip-vox-sort: look up voxOffset and subtitle element from the flat index
+            if savedIdx < len(self._allCallSubs):
+                voxOffset, subElem = self._allCallSubs[savedIdx]
+                subOffset = subElem.get("offset")
+                if callOffset not in radioAlteredJson:
+                    radioAlteredJson[callOffset] = {}
+                if voxOffset not in radioAlteredJson[callOffset]:
+                    radioAlteredJson[callOffset][voxOffset] = {}
+                radioAlteredJson[callOffset][voxOffset][subOffset] = newText
+        else:
+            voxOffset = self._radioVoxKey()
+            subElems = self._radioSubtitleElems()
+            if savedIdx < len(subElems):
+                subOffset = subElems[savedIdx].get("offset")
+                if callOffset not in radioAlteredJson:
+                    radioAlteredJson[callOffset] = {}
+                if voxOffset not in radioAlteredJson[callOffset]:
+                    radioAlteredJson[callOffset][voxOffset] = {}
+                radioAlteredJson[callOffset][voxOffset][subOffset] = newText
 
-        # --- Timing + text → VOX demo -----------------------------------------
-        lines = self._getVoxSubtitleLines()
-        if lines and savedIdx < len(lines):
-            lines[savedIdx].startFrame = self.ui.startFrameBox.value()
-            lines[savedIdx].displayFrames = self.ui.durationBox.value()
-            lines[savedIdx].text = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
+            # --- Sync text to VOX altered JSON --------------------------------------
+            self._syncRadioEditToVox(savedIdx, newText)
+
+            # --- Timing + text → VOX demo -----------------------------------------
+            lines = self._getVoxSubtitleLines()
+            if lines and savedIdx < len(lines):
+                lines[savedIdx].startFrame = self.ui.startFrameBox.value()
+                lines[savedIdx].displayFrames = self.ui.durationBox.value()
+                lines[savedIdx].text = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
 
         # Refresh subtitle list to show new text
         self._modified = True
-        self._refreshSubsList()
+        if self.chkSkipVoxSort.isChecked():
+            self._populateAllCallSubtitles()
+        else:
+            self._refreshSubsList()
         self._populateRadioOffsets()
         self.revertVoxButton.setVisible(callOffset in radioAlteredJson)
         self.applyEditButton.setStyleSheet("")
@@ -3070,6 +3149,112 @@ class MainWindow(QMainWindow):
             f"Auto-formatted: {len(lines)} line(s), "
             f"max {max(sum(self._MGS_WIDTHS.get(c, 0) for c in ln) for ln in lines)}px",
             5000)
+
+    # ── Auto-translate all subtitles ────────────────────────────────────────
+
+    def _autoTranslateAll(self):
+        """Translate, auto-format, and apply every subtitle in the current entry."""
+        from PySide6.QtWidgets import QProgressDialog
+
+        # Gather source texts for all subtitles in the current entry
+        texts = []
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            key, djson = self._modeData()
+            subtitles = djson.get(key, {})
+            for frame in sorted(subtitles.keys(), key=int):
+                texts.append(subtitles[frame].get("text", ""))
+        elif self.chkSkipVoxSort.isChecked() and hasattr(self, '_allCallSubs'):
+            # Radio skip-vox-sort: iterate the flat index
+            callOffset = radioManager.workingCall.get("offset")
+            for voxOffset, subElem in self._allCallSubs:
+                subOffset = subElem.get("offset")
+                voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+                texts.append(voxSubs.get(subOffset, subElem.get("text", "")))
+        else:
+            # Radio mode (normal VOX-cue grouping)
+            subElems = self._radioSubtitleElems()
+            callOffset = radioManager.workingCall.get("offset")
+            voxOffset = self._radioVoxKey()
+            voxSubs = _getRadioVoxSubs(callOffset, voxOffset)
+            for sub in subElems:
+                subOffset = sub.get("offset")
+                texts.append(voxSubs.get(subOffset, sub.get("text", "")))
+
+        if not texts:
+            return
+
+        srcLang = self._appSettings.value("translate/source_lang", "ja")
+        tgtLang = self._appSettings.value("translate/target_lang", "en")
+
+        # Progress dialog
+        self._atProgress = QProgressDialog(
+            f"Translating subtitles ({srcLang} \u2192 {tgtLang})...",
+            "Cancel", 0, len(texts), self)
+        self._atProgress.setWindowTitle("Auto-translate")
+        self._atProgress.setMinimumDuration(0)
+        self._atProgress.setValue(0)
+        self._atProgress.setWindowModality(Qt.WindowModal)
+
+        # Store results as they arrive; apply all when thread finishes
+        self._atResults: list[str] = [""] * len(texts)
+        self._atTotal = len(texts)
+
+        self._atThread = AutoTranslateThread(texts, srcLang, tgtLang, parent=self)
+        self._atThread.lineTranslated.connect(self._onAutoTranslateLine)
+        self._atThread.errorOccurred.connect(self._onAutoTranslateError)
+        self._atThread.finished.connect(self._onAutoTranslateDone)
+        self._atProgress.canceled.connect(self._onAutoTranslateCancel)
+        self._atThread.start()
+
+    def _onAutoTranslateLine(self, idx: int, text: str):
+        """Receive one translated line from the worker thread."""
+        self._atResults[idx] = text
+        self._atProgress.setValue(idx + 1)
+        self._atProgress.setLabelText(
+            f"Translating subtitle {idx + 1} of {self._atTotal}...")
+
+    def _onAutoTranslateError(self, msg: str):
+        self._atProgress.close()
+        QMessageBox.warning(self, "Auto-translate Error", msg)
+
+    def _onAutoTranslateCancel(self):
+        if hasattr(self, '_atThread') and self._atThread.isRunning():
+            self._atThread.requestInterruption()
+            self._atThread.wait()
+
+    def _onAutoTranslateDone(self):
+        """All translations received — auto-format and apply each one."""
+        if not hasattr(self, '_atProgress') or not self._atProgress.isVisible():
+            return  # was cancelled
+        self._atProgress.close()
+
+        from scripts.translation.mgs_font_text import wrap_text
+
+        count = self.ui.subsPreviewList.count()
+        for i, translated in enumerate(self._atResults):
+            if i >= count:
+                break
+            if not translated.strip():
+                continue
+
+            # Select the subtitle row
+            self.ui.subsPreviewList.setCurrentRow(i)
+            QApplication.processEvents()
+
+            # Set translated text in editor
+            self.ui.DialogueEditorBox.setPlainText(translated)
+
+            # Auto-format: wrap to MGS1 pixel widths
+            raw = translated.replace("\n", " ").replace("｜", " ")
+            raw = " ".join(raw.split())
+            lines = wrap_text(raw, self._MGS_WIDTHS)
+            self.ui.DialogueEditorBox.setPlainText("\n".join(lines))
+
+            # Apply edit
+            self.applyEdit()
+
+        self.statusBar().showMessage(
+            f"Auto-translated {len(self._atResults)} subtitle(s)", 5000)
 
     _SPLIT_GAP_FRAMES = 2  # frames between the two halves
 
@@ -3405,6 +3590,7 @@ class MainWindow(QMainWindow):
         self.translateButton.setEnabled(False)
         self.autoFormatButton.setEnabled(False)
         self.callDictButton.setEnabled(False)
+        self.autoTranslateButton.setEnabled(False)
 
     # ── Audio ─────────────────────────────────────────────────────────────────
 
