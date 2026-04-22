@@ -634,6 +634,47 @@ class PreferencesDialog(QDialog):
         buildGroup.setLayout(buildLayout)
         layout.addWidget(buildGroup)
 
+        # ── Subtitle Preview section ─────────────────────────────────────
+        from PySide6.QtWidgets import QSlider, QDoubleSpinBox
+        subGroup = QGroupBox("Subtitle Preview")
+        subGroup.setToolTip(
+            "Adjusts the frame rate used to sync subtitle highlighting\n"
+            "with audio playback. Tune this if subtitles run ahead of or\n"
+            "behind the audio. Unfortunately it must be manually tuned\n"
+            "because audio does not consistently follow a single rate.")
+        subLayout = QHBoxLayout()
+
+        subLayout.addWidget(QLabel("FPS:"))
+
+        self.spinSubFps = QDoubleSpinBox()
+        self.spinSubFps.setRange(20.0, 40.0)
+        self.spinSubFps.setDecimals(2)
+        self.spinSubFps.setSingleStep(0.1)
+        savedFps = float(settings.value("preview/subtitle_fps", SUBTITLE_FPS))
+        self.spinSubFps.setValue(savedFps)
+        subLayout.addWidget(self.spinSubFps)
+
+        self.sliderSubFps = QSlider(Qt.Horizontal)
+        self.sliderSubFps.setRange(2000, 4000)  # slider in centiFPS (20.00–40.00)
+        self.sliderSubFps.setValue(int(savedFps * 100))
+        subLayout.addWidget(self.sliderSubFps, 1)
+
+        btnDefaultFps = QPushButton("Default")
+        btnDefaultFps.setToolTip(f"Reset to {SUBTITLE_FPS}")
+        btnDefaultFps.clicked.connect(
+            lambda: (self.spinSubFps.setValue(SUBTITLE_FPS),
+                     self.sliderSubFps.setValue(int(SUBTITLE_FPS * 100))))
+        subLayout.addWidget(btnDefaultFps)
+
+        # Keep spinbox and slider in sync
+        self.spinSubFps.valueChanged.connect(
+            lambda v: self.sliderSubFps.setValue(int(v * 100)))
+        self.sliderSubFps.valueChanged.connect(
+            lambda v: self.spinSubFps.setValue(v / 100.0))
+
+        subGroup.setLayout(subLayout)
+        layout.addWidget(subGroup)
+
         # ── Buttons ───────────────────────────────────────────────────────
         btnRow = QHBoxLayout()
         btnOk = QPushButton("OK")
@@ -656,6 +697,8 @@ class PreferencesDialog(QDialog):
                                 self.chkRevertWarn.isChecked())
         self._settings.setValue("build/output_dir",
                                 self.txtDefaultOutDir.text().strip())
+        self._settings.setValue("preview/subtitle_fps",
+                                self.spinSubFps.value())
         super().accept()
 
     def _browseDefaultOutDir(self):
@@ -1522,7 +1565,7 @@ class CallDictEditorDialog(QDialog):
         self._gridScroll.setWidgetResizable(True)
         gridWidget = QWidget()
         self._gridLayout = QGridLayout(gridWidget)
-        self._gridLayout.setHorizontalSpacing(2)
+        self._gridLayout.setHorizontalSpacing(5)
         self._gridLayout.setVerticalSpacing(8)
         self._gridScroll.setWidget(gridWidget)
         splitter.addWidget(self._gridScroll)
@@ -1629,6 +1672,13 @@ class CallDictEditorDialog(QDialog):
         for i, btn in enumerate(self._tileButtons):
             row, col = divmod(i, cols)
             self._gridLayout.addWidget(btn, row, col)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._tileButtons:
+            # Force a relayout now that the viewport has its real geometry.
+            self._currentCols = 0
+            self._relayoutGrid()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1964,14 +2014,38 @@ class MainWindow(QMainWindow):
 
         parentLayout.insertLayout(comboIdx + 1, offsetRow)
 
-        # ── Replace subsPreviewList with SubtitleTableWidget ────────────────
+        # ── Replace subsPreviewList with SubtitleTableWidget ─────────────��──
         oldSubsList = self.ui.subsPreviewList
         subsLayout = oldSubsList.parentWidget().layout()
-        subsIdx = subsLayout.indexOf(oldSubsList)
         oldSubsList.setVisible(False)
         oldSubsList.setParent(None)
         self.ui.subsPreviewList = SubtitleTableWidget(self)
-        subsLayout.insertWidget(subsIdx, self.ui.subsPreviewList)
+
+        # ── Lock offset area size, put vox + subtitle lists in a splitter ──
+        # Remove audioCueListView from the vertical layout
+        from PySide6.QtWidgets import QSplitter
+        audioCueIdx = subsLayout.indexOf(self.ui.audioCueListView)
+        subsLayout.removeWidget(self.ui.audioCueListView)
+
+        # Fix the call offset area so it doesn't expand with the window
+        self.ui.offsetListBox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        self.ui.offsetListBox.setMaximumHeight(180)
+
+        # Vertical splitter: audioCueListView (top) + subsPreviewList (bottom)
+        self._listSplitter = QSplitter(Qt.Vertical)
+        self._listSplitter.addWidget(self.ui.audioCueListView)
+        self._listSplitter.addWidget(self.ui.subsPreviewList)
+        self._listSplitter.setStretchFactor(0, 1)
+        self._listSplitter.setStretchFactor(1, 1)
+        subsLayout.insertWidget(audioCueIdx, self._listSplitter)
+
+        # Give all extra vertical space to the splitter, not the offset area
+        for i in range(subsLayout.count()):
+            item = subsLayout.itemAt(i)
+            if item and item.widget() is self._listSplitter:
+                subsLayout.setStretch(i, 1)
+            else:
+                subsLayout.setStretch(i, 0)
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
@@ -1998,6 +2072,15 @@ class MainWindow(QMainWindow):
         self.chkUnclaimedVox.setVisible(False)
         self.chkUnclaimedVox.toggled.connect(self._populateVoxOffsets)
         self.ui.verticalLayout.insertWidget(labelIdx + 3, self.chkUnclaimedVox)
+
+        self.chkSkipVoxSort = QCheckBox("Skip VOX sorting")
+        self.chkSkipVoxSort.setToolTip(
+            "Show all subtitles from the selected call at once,\n"
+            "instead of grouping them by VOX cue.")
+        self.chkSkipVoxSort.setChecked(False)
+        self.chkSkipVoxSort.setVisible(False)
+        self.chkSkipVoxSort.toggled.connect(self._onSkipVoxSortToggled)
+        self.ui.verticalLayout.insertWidget(labelIdx + 4, self.chkSkipVoxSort)
 
         # (frequency filter is now in the nav column beside the offset list)
         self.freqFilterCombo.currentIndexChanged.connect(self._populateRadioOffsets)
@@ -2144,6 +2227,9 @@ class MainWindow(QMainWindow):
         self._modeToolBar = QToolBar("Editor Mode", self)
         self._modeToolBar.setMovable(False)
         self._modeToolBar.setFloatable(False)
+        spacerL = QWidget()
+        spacerL.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._modeToolBar.addWidget(spacerL)
         self._modeTabBar = QTabBar()
         self._modeTabBar.setExpanding(False)
         self._modeTabBar.addTab("RADIO")
@@ -2151,6 +2237,9 @@ class MainWindow(QMainWindow):
         self._modeTabBar.addTab("VOX")
         self._modeTabBar.addTab("ZMOVIE")
         self._modeToolBar.addWidget(self._modeTabBar)
+        spacerR = QWidget()
+        spacerR.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self._modeToolBar.addWidget(spacerR)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._modeToolBar)
         self._modeTabBar.currentChanged.connect(self._onTabChanged)
 
@@ -2165,8 +2254,6 @@ class MainWindow(QMainWindow):
 
         # Elapsed timer for subtitle sync — started when ffplay launches
         self._elapsed = QElapsedTimer()
-        # Tracks which demo keys have already had fps estimated (so we only print once each)
-        self._fpsEstimated: set = set()
 
         # ── Subtitle preview (graphicsView) ──────────────────────────────────
         self._setupSubtitlePreview()
@@ -2551,7 +2638,9 @@ class MainWindow(QMainWindow):
 
         self._clearEditor()
 
-        if self.ui.audioCueListView.count() > 0:
+        if self.chkSkipVoxSort.isChecked():
+            self._populateAllCallSubtitles()
+        elif self.ui.audioCueListView.count() > 0:
             # Auto-select first VOX cue — fires selectAudioCue which populates subtitles
             self.ui.audioCueListView.setCurrentRow(0)
         else:
@@ -2569,6 +2658,52 @@ class MainWindow(QMainWindow):
                     i, original, editedText=edited)
             if self.ui.subsPreviewList.count() > 0:
                 self.ui.subsPreviewList.setCurrentRow(0)
+
+    def _onSkipVoxSortToggled(self, checked: bool):
+        """Toggle between per-VOX-cue and all-at-once subtitle display."""
+        self.ui.audioCueListView.setVisible(not checked)
+        if self._editorMode != "radio":
+            return
+        if checked:
+            self._populateAllCallSubtitles()
+        else:
+            # Re-select current call to restore normal VOX-cue grouping
+            idx = self.ui.offsetListBox.currentIndex()
+            if idx >= 0:
+                self._selectRadioCall(idx)
+
+    def _populateAllCallSubtitles(self):
+        """Show every subtitle from all VOX cues in the current call at once."""
+        self.ui.subsPreviewList.clear()
+        callOffset = radioManager.workingCall.get("offset")
+        if not callOffset:
+            return
+        i = 0
+        # Iterate all VOX_CUES in the call
+        for vox in radioManager.workingCall.findall(".//VOX_CUES"):
+            voxOffset = vox.get("offset")
+            origSubs = radioOriginalJson.get(callOffset, {}).get(voxOffset, {})
+            altSubs = radioAlteredJson.get(callOffset, {}).get(voxOffset, {})
+            for sub in vox.findall("SUBTITLE"):
+                subOffset = sub.get("offset")
+                original = origSubs.get(subOffset, sub.get("text", ""))
+                edited = altSubs.get(subOffset, "")
+                self.ui.subsPreviewList.addSubtitleRow(
+                    i, original, editedText=edited)
+                i += 1
+        # Also include direct subtitles (calls with no VOX_CUES)
+        if not radioManager.workingCall.findall(".//VOX_CUES"):
+            origSubs = radioOriginalJson.get(callOffset, {}).get(callOffset, {})
+            altSubs = radioAlteredJson.get(callOffset, {}).get(callOffset, {})
+            for sub in radioManager.workingCall.findall("SUBTITLE"):
+                subOffset = sub.get("offset")
+                original = origSubs.get(subOffset, sub.get("text", ""))
+                edited = altSubs.get(subOffset, "")
+                self.ui.subsPreviewList.addSubtitleRow(
+                    i, original, editedText=edited)
+                i += 1
+        if self.ui.subsPreviewList.count() > 0:
+            self.ui.subsPreviewList.setCurrentRow(0)
 
     def _selectDemo(self, index):
         global currentDemoKey, currentSubIndex
@@ -3382,7 +3517,6 @@ class MainWindow(QMainWindow):
 
     def _onConversionDone(self, wavPath: str):
         """Launch ffplay on the converted WAV and start the subtitle timer."""
-        self._estimateSubtitleFps(wavPath)
         self._playThread = FfplayThread(wavPath, parent=self)
         self._playThread.playbackFinished.connect(self._onPlaybackFinished)
         self._playThread.errorOccurred.connect(self._onPlaybackError)
@@ -3390,45 +3524,6 @@ class MainWindow(QMainWindow):
         self._elapsed.restart()
         self._frameTimer.start()
         self.statusBar().showMessage("Playing…")
-
-    def _estimateSubtitleFps(self, wavPath: str):
-        """
-        Estimate the subtitle frame rate by comparing audio duration to the
-        last subtitle's end frame.  Prints to console for tuning SUBTITLE_FPS.
-        Only runs once per unique demo entry, in demo mode only.
-        """
-        if self._editorMode not in ("demo", "vox", "zmovie"):
-            return
-        key, djson = self._modeData()
-        if key in self._fpsEstimated:
-            return
-        import wave
-        subtitles = djson.get(key, {})
-        if not subtitles:
-            return
-
-        last_end = max(
-            int(sf) + int(sub.get("duration", "0"))
-            for sf, sub in subtitles.items()
-        )
-        if last_end == 0:
-            return
-
-        try:
-            with wave.open(wavPath, 'rb') as w:
-                audio_duration = w.getnframes() / w.getframerate()
-        except Exception as e:
-            print(f"[subtitle fps] Could not read WAV duration: {e}")
-            return
-
-        estimated_fps = last_end / audio_duration
-        self._fpsEstimated.add(key)
-        print(
-            f"[subtitle fps] {key}: "
-            f"audio={audio_duration:.3f}s  "
-            f"last_end_frame={last_end}  "
-            f"\u2192 estimated fps={estimated_fps:.4f}"
-        )
 
     def _onPlaybackFinished(self):
         self._stopPreview()
@@ -3547,12 +3642,13 @@ class MainWindow(QMainWindow):
     def _tickPreview(self):
         """Called ~30× per second while audio is playing. Updates the subtitle overlay."""
         # For zmovie video playback, use QMediaPlayer position instead of elapsed timer
+        fps = float(self._appSettings.value("preview/subtitle_fps", SUBTITLE_FPS))
         if self._editorMode == "zmovie" and self._mediaPlayer.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             elapsed_ms = max(0, self._mediaPlayer.position())
-            currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
+            currentFrame = int(elapsed_ms * fps / 1000)
         else:
             elapsed_ms = max(0, self._elapsed.elapsed() - SUBTITLE_OFFSET_MS)
-            currentFrame = int(elapsed_ms * SUBTITLE_FPS / 1000)
+            currentFrame = int(elapsed_ms * fps / 1000)
         text = ""
 
         if self._editorMode in ("demo", "vox", "zmovie"):
@@ -4435,6 +4531,7 @@ class MainWindow(QMainWindow):
 
     def _hideRadioWidgets(self):
         self.ui.audioCueListView.setVisible(False)
+        self.ui.audioCueListView.setEnabled(True)
         self.ui.FreqLabel.setVisible(False)
         self.ui.FreqDisplay.setVisible(False)
         self.ui.VoxBlockAddressLabel.setVisible(False)
@@ -4443,6 +4540,7 @@ class MainWindow(QMainWindow):
         self.ui.VoxAddressDisplay.setVisible(False)
         self.chkDisc1Only.setVisible(False)
         self.chkUnclaimedVox.setVisible(False)
+        self.chkSkipVoxSort.setVisible(False)
         self.freqFilterLabel.setVisible(False)
         self.freqFilterCombo.setVisible(False)
         self.revertVoxButton.setVisible(False)
@@ -4524,7 +4622,7 @@ class MainWindow(QMainWindow):
         self.actionRadioMode.setChecked(True)
         self._syncTab()
         # Restore radio-specific widgets
-        self.ui.audioCueListView.setVisible(True)
+        self.ui.audioCueListView.setVisible(not self.chkSkipVoxSort.isChecked())
         self.ui.FreqLabel.setVisible(True)
         self.ui.FreqDisplay.setVisible(True)
         self.ui.VoxBlockAddressLabel.setVisible(True)
@@ -4533,6 +4631,7 @@ class MainWindow(QMainWindow):
         self.ui.VoxAddressDisplay.setVisible(True)
         self.ui.playVoxButton.setEnabled(bool(voxManager))
         self.chkUnclaimedVox.setVisible(False)
+        self.chkSkipVoxSort.setVisible(True)
         self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
         self.revertVoxButton.setVisible(False)
         self.ui.startFrameBox.setEnabled(False)
