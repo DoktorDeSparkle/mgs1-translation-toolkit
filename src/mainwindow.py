@@ -2489,6 +2489,20 @@ class MainWindow(QMainWindow):
         # index doesn't change, so the VOX/subtitle lists would stay stale.
         self._selectRadioCall(self.ui.offsetListBox.currentIndex())
 
+    def _updateRadioOffsetMarker(self, callOffset: str):
+        """Update the bullet marker on the current offset list item without
+        rebuilding the entire list (which would reset VOX/subtitle selections)."""
+        idx = self.ui.offsetListBox.currentIndex()
+        if idx < 0:
+            return
+        listItem = self.ui.offsetListBox.item(idx)
+        if not listItem:
+            return
+        data = self.ui.offsetListBox.currentData()
+        if data:
+            newLabel = f"\u2022 {data}" if callOffset in radioAlteredJson else data
+            listItem.setText(newLabel)
+
     def _populateVoxOffsets(self):
         """Repopulate the VOX offset list, optionally showing only unclaimed clips."""
         filterUnclaimed = self.chkUnclaimedVox.isChecked()
@@ -3057,21 +3071,23 @@ class MainWindow(QMainWindow):
                 lines[savedIdx].displayFrames = self.ui.durationBox.value()
                 lines[savedIdx].text = self.ui.DialogueEditorBox.toPlainText().replace("\n", "｜")
 
-        # Refresh subtitle list to show new text
+        # Refresh subtitle list to show new text (preserve VOX cue selection)
         self._modified = True
         if self.chkSkipVoxSort.isChecked():
             self._populateAllCallSubtitles()
         else:
             self._refreshSubsList()
-        self._populateRadioOffsets()
+        # Update the bullet marker on the current offset list item
+        self._updateRadioOffsetMarker(callOffset)
         self.revertVoxButton.setVisible(callOffset in radioAlteredJson)
         self.applyEditButton.setStyleSheet("")
         if projectFilePath:
             self.statusBar().showMessage("Changes applied (unsaved — use File → Save Project)", 5000)
         else:
             self.statusBar().showMessage("Changes applied (unsaved — use File → Save RADIO.XML or Save Project As)", 5000)
-        # Advance to next entry
-        nextRow = min(savedIdx + 1, self.ui.subsPreviewList.count() - 1)
+        # Advance to next subtitle, or stay on last
+        lastRow = self.ui.subsPreviewList.count() - 1
+        nextRow = min(savedIdx + 1, lastRow)
         self.ui.subsPreviewList.setCurrentRow(nextRow)
 
     # ── Translate / Auto-format helpers ─────────────────────────────────────
