@@ -2006,9 +2006,12 @@ class MainWindow(QMainWindow):
         # ── File Menu (clear and rebuild) ────────────────────────────────────
         self.ui.menuFile.clear()
 
-        # ── Edit Menu ────────────────────────────────────────────────────────
+        # ── Edit Menu (clear and rebuild — .ui has placeholder items) ────────
+        self.ui.menuEdit.clear()
         self._appSettings = QSettings("MGS-Undubbed", "DialogueEditor")
-        self.ui.actionPreferences.triggered.connect(self._openPreferences)
+        actionPreferences = QAction("Preferences...", self)
+        actionPreferences.triggered.connect(self._openPreferences)
+        self.ui.menuEdit.addAction(actionPreferences)
 
         # ── Replace offset combo box with persistent list widget ─────────────
         oldCombo = self.ui.offsetListBox
@@ -2092,6 +2095,16 @@ class MainWindow(QMainWindow):
                 subsLayout.setStretch(i, 1)
             else:
                 subsLayout.setStretch(i, 0)
+
+        # ── Empty-state hint (shown until data is loaded) ─────────────────────
+        self._emptyHint = QLabel(
+            "Open a folder or project to begin\n\n"
+            "File \u2192 Open Folder... (Cmd+O)\n"
+            "File \u2192 Open Project... (Cmd+P)")
+        self._emptyHint.setAlignment(Qt.AlignCenter)
+        self._emptyHint.setStyleSheet("color: #888; padding: 20px;")
+        self._emptyHint.setWordWrap(True)
+        subsLayout.insertWidget(0, self._emptyHint)
 
         # ── Navigation ───────────────────────────────────────────────────────
         self.ui.offsetListBox.currentIndexChanged.connect(self.selectCallOffset)
@@ -2182,8 +2195,9 @@ class MainWindow(QMainWindow):
         # ── Keyboard shortcuts ────────────────────────────────────────────────
         self.ui.playVoxButton.setShortcut(QKeySequence(Qt.CTRL | Qt.Key_Space))
 
-        # ── Bottom-right GUI buttons (above Quit) ────────────────────────────
+        # ── Bottom-right GUI buttons (remove redundant Quit, add actions) ────
         from PySide6.QtWidgets import QFrame
+        self.ui.quitButton.setVisible(False)
         quitIdx = self.ui.verticalLayout_4.indexOf(self.ui.quitButton)
 
         btnOpenFolder = QPushButton("Open Folder...")
@@ -2363,9 +2377,9 @@ class MainWindow(QMainWindow):
         btnCol.addWidget(self.translateButton)
 
         self.autoFormatButton = QPushButton("Auto-format")
-        self.autoFormatButton.setToolTip("Re-wrap text with pixel-accurate MGS1 line breaks (Cmd+F)")
+        self.autoFormatButton.setToolTip("Re-wrap text with pixel-accurate MGS1 line breaks (Cmd+Shift+F)")
         self.autoFormatButton.setEnabled(False)
-        self.autoFormatButton.setShortcut("Ctrl+F")
+        self.autoFormatButton.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_F))
         self.autoFormatButton.clicked.connect(self._autoFormatLine)
         btnCol.addWidget(self.autoFormatButton)
 
@@ -2466,8 +2480,14 @@ class MainWindow(QMainWindow):
         self.freqFilterCombo.setCurrentIndex(idx if idx >= 0 else 0)
         self.freqFilterCombo.blockSignals(False)
 
+    def _hideEmptyHint(self):
+        """Hide the first-run empty-state hint once data is loaded."""
+        if self._emptyHint.isVisible():
+            self._emptyHint.setVisible(False)
+
     def _populateRadioOffsets(self):
         """Repopulate the Radio offset list, applying disc and frequency filters."""
+        self._hideEmptyHint()
         filterDisc2 = self.chkDisc1Only.isChecked()
         filterFreq = self.freqFilterCombo.currentData()  # None = show all
         current = self.ui.offsetListBox.currentData()
@@ -2505,6 +2525,7 @@ class MainWindow(QMainWindow):
 
     def _populateVoxOffsets(self):
         """Repopulate the VOX offset list, optionally showing only unclaimed clips."""
+        self._hideEmptyHint()
         filterUnclaimed = self.chkUnclaimedVox.isChecked()
         merged = _mergedVoxJson()
         current = self.ui.offsetListBox.currentData()
@@ -4767,6 +4788,7 @@ class MainWindow(QMainWindow):
 
     def _populateDemoOffsets(self):
         """Repopulate the DEMO offset list with bullet markers on altered entries."""
+        self._hideEmptyHint()
         merged = _mergedDemoJson()
         current = self.ui.offsetListBox.currentData()
         self.ui.offsetListBox.blockSignals(True)
@@ -4793,6 +4815,7 @@ class MainWindow(QMainWindow):
 
     def _populateZmovieOffsets(self):
         """Repopulate the ZMOVIE offset list with bullet markers on altered entries."""
+        self._hideEmptyHint()
         merged = _mergedZmovieJson()
         current = self.ui.offsetListBox.currentData()
         self.ui.offsetListBox.blockSignals(True)
@@ -5184,6 +5207,9 @@ class MainWindow(QMainWindow):
 
         # Return to radio mode (default)
         self._switchToRadioMode()
+
+        # Show first-run hint again
+        self._emptyHint.setVisible(True)
 
         self.setWindowTitle("Dialogue Editor")
         self.statusBar().showMessage("Project closed.", 3000)

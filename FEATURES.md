@@ -115,6 +115,12 @@
 
 7. **RADIO.DAT executable patcher for --long mode** — the Japanese version requires a binary patch to the game executable to support the `--long` RADIO.DAT format (extended call lengths). Need to integrate a patcher that identifies the game version by SHA-256 hash and applies the correct patch. Should support multiple disc versions (JP, Integral, etc.) as part of a larger packaging/distribution flow.
 
+8. **Handle furigana and special markings (`# {} #`)** — the game data contains inline furigana and other special markup delimited by `# {} #` sequences. These currently display as raw markup in the editor and can be corrupted or lost during editing. Need to parse these sequences properly: display them in a readable way in the subtitle editor (e.g. as annotated text or a tooltip), preserve them through edit round-trips, and handle them correctly during compile so the game renders them as intended.
+
+9. **Text search / filter** — add a search field above the offset list that filters entries across all modes to only those containing a keyword or phrase in their subtitle text. Useful for finding specific lines of dialogue without scrolling through hundreds of entries.
+
+10. **Out-of-bounds subtitle markers** — visually flag entries in the offset/subtitle lists that exceed the game's display limits. Rules: Radio mode allows 4 lines max; Demo, VOX, and ZMovie modes allow 2 lines max. All modes share the same per-line pixel-width limit (260px, using the MGS1 glyph widths from `_MGS_WIDTHS` / `wrap_text`). Entries that violate either constraint (too many lines or any line too wide) should be marked in the list (e.g. with a warning icon or colour) so translators can spot overflow at a glance without compiling.
+
 ## Fixed Bugs
 
 1. **VOX subtitle dropped after radio split** — `_syncJsonToManager()` would break when the altered JSON had more subtitles than the binary demo object after a split/duplicate, silently dropping the new subtitle. Fixed by creating new `dialogueLine` objects for extra entries and appending them to the caption segment.
