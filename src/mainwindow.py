@@ -420,6 +420,7 @@ class OffsetListWidget(_QListWidget):
         super().__init__(parent)
         self._userData = []  # parallel list of userData per row
         self.currentRowChanged.connect(self.currentIndexChanged)
+        self.setAlternatingRowColors(True)
 
     def addItem(self, text, userData=None):
         super().addItem(text)
@@ -2079,6 +2080,9 @@ class MainWindow(QMainWindow):
         # Fix the call offset area so it doesn't expand with the window
         self.ui.offsetListBox.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         self.ui.offsetListBox.setMaximumHeight(180)
+
+        # Alternating shading on the VOX cue list for readability
+        self.ui.audioCueListView.setAlternatingRowColors(True)
 
         # Vertical splitter: audioCueListView (top) + subsPreviewList (bottom)
         self._listSplitter = QSplitter(Qt.Vertical)
@@ -3883,9 +3887,22 @@ class MainWindow(QMainWindow):
                     text = sub.get("text", "").replace("｜", "\n")
                     break
         else:
-            for line in self._getVoxSubtitleLines():
+            # Radio mode: timings come from binary dialogueLines; text comes
+            # from radioAlteredJson when present (so edits show in preview),
+            # else from the binary line (which may also reflect in-session edits).
+            callOffset = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
+            voxOffset = radioManager.workingVox.get("offset") if radioManager.workingVox is not None else None
+            altSubs = (radioAlteredJson.get(callOffset, {}).get(voxOffset, {})
+                       if callOffset and voxOffset else {})
+            subElems = (list(radioManager.workingVox.findall("SUBTITLE"))
+                        if radioManager.workingVox is not None else [])
+            for i, line in enumerate(self._getVoxSubtitleLines()):
                 if line.startFrame <= currentFrame < line.startFrame + line.displayFrames:
-                    text = line.text.replace('\x00', '').replace("｜", "\n")
+                    edited = ""
+                    if i < len(subElems):
+                        edited = altSubs.get(subElems[i].get("offset"), "")
+                    raw = edited if edited else line.text
+                    text = raw.replace('\x00', '').replace("\\r\\n", "\n").replace("｜", "\n")
                     break
 
         # Route subtitle text to the appropriate display
