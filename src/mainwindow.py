@@ -27,6 +27,11 @@ from scripts import demoClasses as voxCtl
 from scripts import demoManager as DM
 import scripts.audioTools.vagAudioTools as VAG
 
+try:
+    import vlc as _vlc  # python-vlc, used for ZMovie playback with soft subs
+except (ImportError, OSError):
+    _vlc = None
+
 # Initialize Radio Data Editor
 radioManager = RDE()
 voxManager: dict[str, voxCtl.demo] = {}
@@ -72,6 +77,36 @@ def _mergedZmovieJson() -> dict:
     merged = dict(zmovieOriginalJson)
     merged.update(zmovieAlteredJson)
     return merged
+
+def _msToSrtTimestamp(ms: int) -> str:
+    """Format milliseconds as SRT timestamp (HH:MM:SS,mmm)."""
+    total_sec = ms // 1000
+    return (f"{total_sec // 3600:02d}:"
+            f"{(total_sec % 3600) // 60:02d}:"
+            f"{total_sec % 60:02d},"
+            f"{ms % 1000:03d}")
+
+def _zmovieSubtitlesToSrt(subtitlesJson: dict, fps: float) -> str:
+    """Render a zmovie entry's subtitle dict as an SRT-format string.
+    Normalises the in-game line-break marker (｜, U+FF5C), literal "\\r\\n"
+    sequences from radio-imported text, and stray null bytes — same rules the
+    in-app preview applies (see mainwindow.py:_tickPreview)."""
+    lines = []
+    for index, startFrame_str in enumerate(sorted(subtitlesJson.keys(), key=int), start=1):
+        entry = subtitlesJson[startFrame_str]
+        startFrame = int(startFrame_str)
+        duration = int(entry.get("duration", "0"))
+        text = (entry.get("text", "")
+                .replace("\x00", "")
+                .replace("\\r\\n", "\n")
+                .replace("｜", "\n"))
+        startMs = int(startFrame * 1000 / fps)
+        endMs   = int((startFrame + duration) * 1000 / fps)
+        lines.append(str(index))
+        lines.append(f"{_msToSrtTimestamp(startMs)} --> {_msToSrtTimestamp(endMs)}")
+        lines.append(text)
+        lines.append("")
+    return "\n".join(lines)
 
 # Radio iseeva JSON state (calls-only for now)
 # Structure: {callOffset: {voxOffset: {subtitleOffset: "text", ...}, ...}, ...}
@@ -325,7 +360,7 @@ class FfplayThread(QThread):
 class ZmovieConversionThread(QThread):
     """
     Extracts a zmovie entry from ZMOVIE.STR as a raw PSX STR file, then
-    converts it to MP4 via ffmpeg for playback in QMediaPlayer.
+    converts it to MP4 via ffmpeg for playback.
     Emits conversionDone(mp4Path) when ready.
     """
     conversionDone = Signal(str)
@@ -355,8 +390,9 @@ class ZmovieConversionThread(QThread):
             cmd = ['ffmpeg', '-y', '-i', strPath, mp4Path]
             self._proc = subprocess.Popen(cmd,
                                           stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL)
-            ret = self._proc.wait()
+                                          stderr=subprocess.PIPE)
+            _, stderr = self._proc.communicate()
+            ret = self._proc.returncode
             self._proc = None
 
             if self.isInterruptionRequested():
@@ -364,7 +400,13 @@ class ZmovieConversionThread(QThread):
             if ret == 0:
                 self.conversionDone.emit(mp4Path)
             else:
-                self.errorOccurred.emit(f"ffmpeg exited with code {ret}")
+                # Surface the last few lines of ffmpeg stderr for diagnosis.
+                tail = ""
+                if stderr:
+                    decoded = stderr.decode('utf-8', errors='replace').strip().splitlines()
+                    tail = "\n".join(decoded[-8:])
+                self.errorOccurred.emit(
+                    f"ffmpeg exited with code {ret}\n\n{tail}".strip())
         except FileNotFoundError:
             self.errorOccurred.emit("ffmpeg not found — is FFmpeg installed and on PATH?")
         except Exception as e:
@@ -759,6 +801,106 @@ class _LogCapture:
         self._original.write(text)
     def flush(self):
         self._original.flush()
+
+
+class ZmoviePlaybackWindow(QDialog):
+    """
+    Standalone playback window backed by libVLC (via python-vlc). libVLC
+    renders soft subtitles natively, so we don't need libass-in-ffmpeg.
+    The .srt is loaded as a sub-file media option alongside the .mp4.
+    """
+    def __init__(self, mp4Path: str, srtPath: str = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"ZMovie Playback — {os.path.basename(mp4Path)}")
+        self.setMinimumSize(800, 600)
+        self._mp4Path = mp4Path
+        self._srtPath = srtPath
+        self._embedded = False
+
+        layout = QVBoxLayout()
+
+        self._videoFrame = QFrame()
+        self._videoFrame.setStyleSheet("background-color: black;")
+        self._videoFrame.setMinimumHeight(360)
+        layout.addWidget(self._videoFrame)
+
+        controlLayout = QHBoxLayout()
+        self._playBtn = QPushButton("Play")
+        self._playBtn.clicked.connect(self._play)
+        self._pauseBtn = QPushButton("Pause")
+        self._pauseBtn.clicked.connect(self._pause)
+        self._stopBtn = QPushButton("Stop")
+        self._stopBtn.clicked.connect(self._stop)
+        controlLayout.addWidget(self._playBtn)
+        controlLayout.addWidget(self._pauseBtn)
+        controlLayout.addWidget(self._stopBtn)
+        controlLayout.addStretch()
+        layout.addLayout(controlLayout)
+        self.setLayout(layout)
+
+        # Build the libVLC instance + media now; embedding waits until showEvent
+        # so the QFrame's native window handle is realized.
+        # Mirror the in-app preview's font family / weight / color on libVLC's
+        # freetype renderer. fontsize is pixels (not points) and lives on a
+        # different scale from the QGraphicsTextItem; tune VLC_SUB_FONTSIZE_PX
+        # if it looks too big or small.
+        VLC_SUB_FONTSIZE_PX = 10
+        family = "Arial"
+        bold = True
+        color_int = 0xFFFFFF
+        previewItem = getattr(parent, "_previewTextItem", None)
+        if previewItem is not None:
+            f = previewItem.font()
+            family = f.family()
+            bold = f.bold()
+            color_int = previewItem.defaultTextColor().rgb() & 0xFFFFFF
+
+        opts = [
+            f"--freetype-font={family}",
+            f"--freetype-fontsize={VLC_SUB_FONTSIZE_PX}",
+            f"--freetype-color={color_int}",
+        ]
+        if bold:
+            opts.append("--freetype-bold")
+        self._instance = _vlc.Instance(*opts)
+        self._player = self._instance.media_player_new()
+        media = self._instance.media_new(mp4Path)
+        if srtPath:
+            media.add_options(f":sub-file={srtPath}")
+        self._player.set_media(media)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._embedded:
+            return
+        winId = int(self._videoFrame.winId())
+        # Each platform has its own embedding API on libVLC.
+        if sys.platform == "darwin":
+            self._player.set_nsobject(winId)
+        elif sys.platform.startswith("linux"):
+            self._player.set_xwindow(winId)
+        elif sys.platform == "win32":
+            self._player.set_hwnd(winId)
+        self._embedded = True
+
+    def _play(self):
+        self._player.play()
+
+    def _pause(self):
+        self._player.pause()
+
+    def _stop(self):
+        self._player.stop()
+
+    def closeEvent(self, event):
+        # Halt playback and tear down the player so audio doesn't keep going.
+        try:
+            self._player.stop()
+            self._player.release()
+            self._instance.release()
+        except Exception:
+            pass
+        super().closeEvent(event)
 
 
 class FinalizeProgressDialog(QDialog):
@@ -2386,6 +2528,12 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_F))
         self.autoFormatButton.clicked.connect(self._autoFormatLine)
         btnCol.addWidget(self.autoFormatButton)
+
+        self.exportPlayZmovieButton = QPushButton("Export & Play")
+        self.exportPlayZmovieButton.setToolTip("Export current ZMovie entry to MP4 + SRT, then play in separate window")
+        self.exportPlayZmovieButton.setEnabled(False)
+        self.exportPlayZmovieButton.clicked.connect(self._exportAndPlayZmovie)
+        btnCol.addWidget(self.exportPlayZmovieButton)
 
         btnCol.addStretch()
 
@@ -4052,6 +4200,64 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Compile Error", str(e))
 
+    def _exportAndPlayZmovie(self):
+        """Export current ZMovie entry to MP4 + SRT, then open in playback window."""
+        if _vlc is None:
+            QMessageBox.critical(
+                self, "VLC required",
+                "ZMovie playback uses libVLC for subtitle rendering.\n\n"
+                "Install with:\n  pip install python-vlc\n\n"
+                "and make sure VLC.app is installed (brew install --cask vlc).")
+            return
+        if not currentZmovieKey or not zmovieOriginalData:
+            QMessageBox.warning(self, "Nothing selected", "No ZMovie entry is currently selected.")
+            return
+
+        try:
+            entryIndex = int(currentZmovieKey.split("-")[1])
+        except (ValueError, IndexError):
+            QMessageBox.critical(self, "Error", f"Invalid ZMovie key: {currentZmovieKey}")
+            return
+
+        merged = _mergedZmovieJson()
+        if currentZmovieKey not in merged or not merged[currentZmovieKey]:
+            QMessageBox.warning(self, "No subtitles", f"{currentZmovieKey} has no subtitle data.")
+            return
+
+        # Write SRT now (cheap); MP4 conversion runs off-thread below.
+        tmpDir = tempfile.gettempdir()
+        subtitles = merged[currentZmovieKey]
+        fps = float(self._appSettings.value("preview/subtitle_fps", SUBTITLE_FPS))
+        srt_path = os.path.join(tmpDir, f"zmovie_{entryIndex:02}.srt")
+        with open(srt_path, 'w', encoding='utf-8') as f:
+            f.write(_zmovieSubtitlesToSrt(subtitles, fps=fps))
+        self._pendingSrtPath = srt_path
+
+        self.exportPlayZmovieButton.setEnabled(False)
+        self.statusBar().showMessage("Exporting ZMovie to MP4…")
+
+        self._exportPlayThread = ZmovieConversionThread(
+            zmovieOriginalData, entryIndex, parent=self)
+        self._exportPlayThread.conversionDone.connect(self._onExportPlayConversionDone)
+        self._exportPlayThread.errorOccurred.connect(self._onExportPlayError)
+        self._exportPlayThread.start()
+
+    def _onExportPlayConversionDone(self, mp4Path: str):
+        self.exportPlayZmovieButton.setEnabled(bool(zmovieOriginalData))
+        self.statusBar().showMessage("ZMovie ready.", 2000)
+
+        existing = getattr(self, '_zmoviePlaybackWindow', None)
+        if existing is not None:
+            existing.close()
+        srtPath = getattr(self, '_pendingSrtPath', None)
+        self._zmoviePlaybackWindow = ZmoviePlaybackWindow(mp4Path, srtPath, self)
+        self._zmoviePlaybackWindow.show()
+
+    def _onExportPlayError(self, msg: str):
+        self.exportPlayZmovieButton.setEnabled(bool(zmovieOriginalData))
+        self.statusBar().showMessage("ZMovie export failed.", 3000)
+        QMessageBox.critical(self, "Conversion failed", msg)
+
     def exportDemoJson(self):
         """Save demoAlteredJson (only changed entries) to a JSON file."""
         if not demoAlteredJson:
@@ -4796,6 +5002,7 @@ class MainWindow(QMainWindow):
         self._syncTab()
         self._hideRadioWidgets()
         self.ui.playVoxButton.setEnabled(bool(demoOriginalJson) or bool(demoAlteredJson))
+        self.exportPlayZmovieButton.setEnabled(False)
         self._populateDemoOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
@@ -4823,6 +5030,7 @@ class MainWindow(QMainWindow):
         self._syncTab()
         self._hideRadioWidgets()
         self.ui.playVoxButton.setEnabled(bool(zmovieOriginalData))
+        self.exportPlayZmovieButton.setEnabled(bool(zmovieOriginalData))
         self._populateZmovieOffsets()
         self._clearEditor()
         self.ui.subsPreviewList.clear()
@@ -4850,6 +5058,7 @@ class MainWindow(QMainWindow):
         self._syncTab()
         self._hideRadioWidgets()
         self.ui.playVoxButton.setEnabled(bool(voxOriginalJson) or bool(voxAlteredJson))
+        self.exportPlayZmovieButton.setEnabled(False)
         self.chkUnclaimedVox.setVisible(bool(_radioClaimedVoxAddrs))
         self.revertVoxButton.setVisible(False)
         self._populateVoxOffsets()
@@ -4872,6 +5081,7 @@ class MainWindow(QMainWindow):
         self.ui.VoxAddressLabel.setVisible(True)
         self.ui.VoxAddressDisplay.setVisible(True)
         self.ui.playVoxButton.setEnabled(bool(voxManager))
+        self.exportPlayZmovieButton.setEnabled(False)
         self.chkUnclaimedVox.setVisible(False)
         self.chkSkipVoxSort.setVisible(True)
         self.chkDisc1Only.setVisible(bool(_radioDisc2Offsets))
