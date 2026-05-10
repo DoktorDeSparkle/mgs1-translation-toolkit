@@ -840,11 +840,10 @@ class ZmoviePlaybackWindow(QDialog):
 
         # Build the libVLC instance + media now; embedding waits until showEvent
         # so the QFrame's native window handle is realized.
-        # Mirror the in-app preview's font family / weight / color on libVLC's
-        # freetype renderer. fontsize is pixels (not points) and lives on a
-        # different scale from the QGraphicsTextItem; tune VLC_SUB_FONTSIZE_PX
-        # if it looks too big or small.
-        VLC_SUB_FONTSIZE_PX = 10
+        # Use --freetype-rel-fontsize (video_height / N) rather than the
+        # absolute --freetype-fontsize: the absolute form stays fixed in output
+        # pixels, so subs appear to shrink as the window grows. Lower N = larger glyphs.
+        VLC_SUB_REL_FONTSIZE = 16
         family = "Arial"
         bold = True
         color_int = 0xFFFFFF
@@ -857,7 +856,7 @@ class ZmoviePlaybackWindow(QDialog):
 
         opts = [
             f"--freetype-font={family}",
-            f"--freetype-fontsize={VLC_SUB_FONTSIZE_PX}",
+            f"--freetype-rel-fontsize={VLC_SUB_REL_FONTSIZE}",
             f"--freetype-color={color_int}",
         ]
         if bold:
