@@ -29,8 +29,42 @@ import scripts.audioTools.vagAudioTools as VAG
 
 try:
     import vlc as _vlc  # python-vlc, used for ZMovie playback with soft subs
-except (ImportError, OSError):
+    _vlcMissingReason = None  # None | "binding" | "library"
+except ImportError:
     _vlc = None
+    _vlcMissingReason = "binding"
+except OSError:
+    # python-vlc imported but ctypes couldn't locate the libvlc shared library.
+    _vlc = None
+    _vlcMissingReason = "library"
+
+
+def _vlcMissingMessage() -> str:
+    """Install instructions for VLC, tailored to the current OS and to which
+    piece (Python binding vs libvlc runtime) is missing."""
+    if _vlcMissingReason == "binding":
+        head = "The python-vlc binding is not installed."
+        binding = "  pip install python-vlc\n\n"
+    else:
+        head = "libVLC (VLC media player runtime) could not be loaded."
+        binding = ""
+
+    if sys.platform == "darwin":
+        runtime = ("Install VLC.app:\n"
+                   "  brew install --cask vlc\n"
+                   "or download from https://www.videolan.org/vlc/.")
+    elif sys.platform.startswith("linux"):
+        runtime = ("Install libVLC via your package manager:\n"
+                   "  Debian/Ubuntu:  sudo apt install vlc\n"
+                   "  Fedora:         sudo dnf install vlc\n"
+                   "  Arch:           sudo pacman -S vlc")
+    elif sys.platform == "win32":
+        runtime = ("Install VLC for Windows from https://www.videolan.org/vlc/.\n"
+                   "python-vlc auto-locates libvlc.dll from the default install path.")
+    else:
+        runtime = "Install VLC media player from https://www.videolan.org/vlc/."
+
+    return f"{head}\n\n{binding}{runtime}"
 
 # Initialize Radio Data Editor
 radioManager = RDE()
@@ -4202,11 +4236,7 @@ class MainWindow(QMainWindow):
     def _exportAndPlayZmovie(self):
         """Export current ZMovie entry to MP4 + SRT, then open in playback window."""
         if _vlc is None:
-            QMessageBox.critical(
-                self, "VLC required",
-                "ZMovie playback uses libVLC for subtitle rendering.\n\n"
-                "Install with:\n  pip install python-vlc\n\n"
-                "and make sure VLC.app is installed (brew install --cask vlc).")
+            QMessageBox.critical(self, "VLC required", _vlcMissingMessage())
             return
         if not currentZmovieKey or not zmovieOriginalData:
             QMessageBox.warning(self, "Nothing selected", "No ZMovie entry is currently selected.")
