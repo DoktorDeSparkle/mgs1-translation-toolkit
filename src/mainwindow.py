@@ -2989,12 +2989,17 @@ class MainWindow(QMainWindow):
         origSubs = demoOriginalJson.get(key, {})
         altSubs = demoAlteredJson.get(key, {})
         modified = key in demoAlteredJson
-        # Show original subtitles; show edited text only where altered
-        for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
-            origSub = origSubs[startFrame]
-            origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+        # Show merged subtitles (altered may add new frames via Split Subtitle)
+        allFrames = sorted(set(origSubs.keys()) | set(altSubs.keys()), key=int)
+        for i, startFrame in enumerate(allFrames):
+            origSub = origSubs.get(startFrame, {})
             altSub = altSubs.get(startFrame, {})
-            editedText = altSub.get("text", "").strip() if altSub else ""
+            if origSub:
+                origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                editedText = altSub.get("text", "").strip() if altSub else ""
+            else:
+                origText = altSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                editedText = ""
             self.ui.subsPreviewList.addSubtitleRow(
                 i, origText, editedText=editedText)
         # Enable revert button only if this entry has been altered
@@ -3015,11 +3020,16 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         origSubs = zmovieOriginalJson.get(key, {})
         altSubs = zmovieAlteredJson.get(key, {})
-        for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
-            origSub = origSubs[startFrame]
-            origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+        allFrames = sorted(set(origSubs.keys()) | set(altSubs.keys()), key=int)
+        for i, startFrame in enumerate(allFrames):
+            origSub = origSubs.get(startFrame, {})
             altSub = altSubs.get(startFrame, {})
-            editedText = altSub.get("text", "").strip() if altSub else ""
+            if origSub:
+                origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                editedText = altSub.get("text", "").strip() if altSub else ""
+            else:
+                origText = altSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                editedText = ""
             self.ui.subsPreviewList.addSubtitleRow(
                 i, origText, editedText=editedText)
         self.revertVoxButton.setVisible(self._editorMode == "zmovie" and modified)
@@ -3039,11 +3049,16 @@ class MainWindow(QMainWindow):
         self.ui.subsPreviewList.clear()
         origSubs = voxOriginalJson.get(key, {})
         altSubs = voxAlteredJson.get(key, {})
-        for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
-            origSub = origSubs[startFrame]
-            origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+        allFrames = sorted(set(origSubs.keys()) | set(altSubs.keys()), key=int)
+        for i, startFrame in enumerate(allFrames):
+            origSub = origSubs.get(startFrame, {})
             altSub = altSubs.get(startFrame, {})
-            editedText = altSub.get("text", "").strip() if altSub else ""
+            if origSub:
+                origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                editedText = altSub.get("text", "").strip() if altSub else ""
+            else:
+                origText = altSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                editedText = ""
             self.ui.subsPreviewList.addSubtitleRow(
                 i, origText, editedText=editedText)
         # Enable revert button only if this entry has been altered
@@ -3779,11 +3794,17 @@ class MainWindow(QMainWindow):
                 key = currentZmovieKey
                 origSubs = zmovieOriginalJson.get(key, {})
                 altSubs = zmovieAlteredJson.get(key, {})
-            for i, startFrame in enumerate(sorted(origSubs.keys(), key=int)):
-                origSub = origSubs[startFrame]
-                origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+            allFrames = sorted(set(origSubs.keys()) | set(altSubs.keys()), key=int)
+            for i, startFrame in enumerate(allFrames):
+                origSub = origSubs.get(startFrame, {})
                 altSub = altSubs.get(startFrame, {})
-                editedText = altSub.get("text", "").strip() if altSub else ""
+                if origSub:
+                    origText = origSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                    editedText = altSub.get("text", "").strip() if altSub else ""
+                else:
+                    # Frame only exists in altered (e.g. added via Split Subtitle)
+                    origText = altSub.get("text", "").strip() or f"[Frame {startFrame}]"
+                    editedText = ""
                 self.ui.subsPreviewList.addSubtitleRow(
                     i, origText, editedText=editedText)
         else:
