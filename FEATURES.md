@@ -121,6 +121,8 @@
 
 10. **Out-of-bounds subtitle markers** — visually flag entries in the offset/subtitle lists that exceed the game's display limits. Rules: Radio mode allows 4 lines max; Demo, VOX, and ZMovie modes allow 2 lines max. All modes share the same per-line pixel-width limit (260px, using the MGS1 glyph widths from `_MGS_WIDTHS` / `wrap_text`). Entries that violate either constraint (too many lines or any line too wide) should be marked in the list (e.g. with a warning icon or colour) so translators can spot overflow at a glance without compiling.
 
+11. **Export RADIO.XML** — the Export menu currently emits altered-only JSON for each DAT (Radio, Demo, VOX, ZMovie). Add a sibling action that writes the full in-memory radio XML tree to a `.xml` file, mirroring what the legacy "Save RADIO.XML" path used to produce, so the XML can be round-tripped through `xmlModifierTools` / `RadioDatRecompiler` from the CLI without going through the GUI's altered-JSON format.
+
 ## Fixed Bugs
 
 1. **VOX subtitle dropped after radio split** — `_syncJsonToManager()` would break when the altered JSON had more subtitles than the binary demo object after a split/duplicate, silently dropping the new subtitle. Fixed by creating new `dialogueLine` objects for extra entries and appending them to the caption segment.
