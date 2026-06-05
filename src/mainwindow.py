@@ -2234,6 +2234,12 @@ class MainWindow(QMainWindow):
         self.autoTranslateButton.setEnabled(False)
         self.autoTranslateButton.clicked.connect(self._autoTranslateAll)
         rightCol.addWidget(self.autoTranslateButton)
+        self.revertVoxButton = QPushButton("Revert Entry")
+        self.revertVoxButton.setToolTip(
+            "Discard all changes to this entry and restore the original")
+        self.revertVoxButton.setVisible(False)
+        self.revertVoxButton.clicked.connect(self._revertVoxEntry)
+        rightCol.addWidget(self.revertVoxButton)
         rightCol.addStretch()
         offsetRow.addLayout(rightCol, stretch=1)
 
@@ -2461,6 +2467,30 @@ class MainWindow(QMainWindow):
         self.actionCallDictEditor.triggered.connect(self._openCallDictEditor)
         toolsMenu.addAction(self.actionCallDictEditor)
 
+        # ── Export menu ─────────────────────────────────────────────────────
+        # Exports altered-only JSON per DAT, for round-tripping with CLI tools.
+        exportMenu = self.menuBar().addMenu("Export")
+
+        self.actionExportRadioJson = QAction("Radio JSON...", self)
+        self.actionExportRadioJson.setStatusTip("Export altered RADIO subtitles as JSON")
+        self.actionExportRadioJson.triggered.connect(self.exportRadioJson)
+        exportMenu.addAction(self.actionExportRadioJson)
+
+        self.actionExportDemoJson = QAction("Demo JSON...", self)
+        self.actionExportDemoJson.setStatusTip("Export altered DEMO subtitles as JSON")
+        self.actionExportDemoJson.triggered.connect(self.exportDemoJson)
+        exportMenu.addAction(self.actionExportDemoJson)
+
+        self.actionExportVoxJson = QAction("VOX JSON...", self)
+        self.actionExportVoxJson.setStatusTip("Export altered VOX subtitles as JSON")
+        self.actionExportVoxJson.triggered.connect(self.exportVoxJson)
+        exportMenu.addAction(self.actionExportVoxJson)
+
+        self.actionExportZmovieJson = QAction("ZMovie JSON...", self)
+        self.actionExportZmovieJson.setStatusTip("Export altered ZMOVIE subtitles as JSON")
+        self.actionExportZmovieJson.triggered.connect(self.exportZmovieJson)
+        exportMenu.addAction(self.actionExportZmovieJson)
+
         # ── Mode tab bar ───────────────────────────────────────────────────────
         from PySide6.QtWidgets import QToolBar, QTabBar
         self._modeToolBar = QToolBar("Editor Mode", self)
@@ -2542,11 +2572,12 @@ class MainWindow(QMainWindow):
         self.deleteSubButton.clicked.connect(self.deleteSubtitle)
         btnCol.addWidget(self.deleteSubButton)
 
-        self.revertVoxButton = QPushButton("Revert to Original")
-        self.revertVoxButton.setToolTip("Discard changes and restore the original VOX entry")
-        self.revertVoxButton.setVisible(False)
-        self.revertVoxButton.clicked.connect(self._revertVoxEntry)
-        btnCol.addWidget(self.revertVoxButton)
+        self.revertSubButton = QPushButton("Revert Subtitle")
+        self.revertSubButton.setToolTip(
+            "Restore this subtitle to the original Japanese text")
+        self.revertSubButton.setEnabled(False)
+        self.revertSubButton.clicked.connect(self._revertSubtitle)
+        btnCol.addWidget(self.revertSubButton)
 
         self.translateButton = QPushButton("Translate")
         self.translateButton.setToolTip("Translate the current line (Cmd+T)")
@@ -3165,6 +3196,7 @@ class MainWindow(QMainWindow):
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
         self.callDictButton.setEnabled(self._editorMode in ("radio", "demo", "vox"))
         self.autoTranslateButton.setEnabled(True)
+        self.revertSubButton.setEnabled(True)
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
 
@@ -3239,10 +3271,7 @@ class MainWindow(QMainWindow):
             self._modified = True
             self._refreshSubsList()
             self.applyEditButton.setStyleSheet("")
-            label = {"demo": "DEMO", "vox": "VOX", "zmovie": "ZMovie"}.get(self._editorMode, "")
-            self.statusBar().showMessage(
-                f"Changes applied (unsaved \u2014 use File \u2192 Export {label} JSON)", 5000
-            )
+            self.statusBar().showMessage("Changes applied", 3000)
             # Update revert button visibility and offset list markers
             if self._editorMode == "vox":
                 self.revertVoxButton.setVisible(key in voxAlteredJson)
@@ -3653,6 +3682,78 @@ class MainWindow(QMainWindow):
         self._clearEditor()
         self.statusBar().showMessage(f"{key} reverted to original", 3000)
 
+    def _revertSubtitle(self):
+        """Revert only the currently-selected subtitle to its original text."""
+        global currentSubIndex
+        if currentSubIndex < 0:
+            return
+
+        if self._editorMode in ("demo", "vox", "zmovie"):
+            if self._editorMode == "vox":
+                key, origJson, altJson = currentVoxKey, voxOriginalJson, voxAlteredJson
+            elif self._editorMode == "demo":
+                key, origJson, altJson = currentDemoKey, demoOriginalJson, demoAlteredJson
+            else:
+                key, origJson, altJson = currentZmovieKey, zmovieOriginalJson, zmovieAlteredJson
+            if not key:
+                return
+            origSubs = origJson.get(key, {})
+            altSubs = altJson.get(key, {})
+            allFrames = sorted(set(origSubs.keys()) | set(altSubs.keys()), key=int)
+            if currentSubIndex >= len(allFrames):
+                return
+            frame = allFrames[currentSubIndex]
+            if frame not in altSubs:
+                self.statusBar().showMessage("Subtitle already matches original", 3000)
+                return
+            del altSubs[frame]
+            if not altSubs:
+                del altJson[key]
+            self._modified = True
+            self._refreshSubsList()
+            # Row index may have shifted if a split-added frame was removed
+            newAllFrames = sorted(set(origSubs.keys()) | set(altJson.get(key, {}).keys()), key=int)
+            if frame in newAllFrames:
+                newRow = newAllFrames.index(frame)
+            else:
+                newRow = min(currentSubIndex, len(newAllFrames) - 1)
+            if newRow >= 0:
+                self.ui.subsPreviewList.setCurrentRow(newRow)
+            self.revertVoxButton.setVisible(key in altJson)
+            self.statusBar().showMessage("Subtitle reverted to original", 3000)
+            return
+
+        # Radio mode — drop the per-subtitle entry from radioAlteredJson and
+        # restore the XML element's text from the original JSON.
+        subElems = self._radioSubtitleElems()
+        if currentSubIndex >= len(subElems):
+            return
+        subElem = subElems[currentSubIndex]
+        subOffset = subElem.get("offset")
+        callOffset = radioManager.workingCall.get("offset") if radioManager.workingCall is not None else None
+        voxOffset = self._radioVoxKey()
+        if not callOffset or not voxOffset:
+            return
+        origSubs = radioOriginalJson.get(callOffset, {}).get(voxOffset, {})
+        callAlt = radioAlteredJson.get(callOffset, {})
+        voxAlt = callAlt.get(voxOffset, {})
+        if subOffset not in voxAlt:
+            self.statusBar().showMessage("Subtitle already matches original", 3000)
+            return
+        del voxAlt[subOffset]
+        if not voxAlt:
+            del callAlt[voxOffset]
+        if not callAlt:
+            del radioAlteredJson[callOffset]
+        # Restore XML text from original JSON so the in-memory call matches
+        origText = origSubs.get(subOffset, subElem.get("text", ""))
+        subElem.set("text", origText)
+        self._modified = True
+        self._refreshSubsList()
+        self.ui.subsPreviewList.setCurrentRow(currentSubIndex)
+        self.revertVoxButton.setVisible(callOffset in radioAlteredJson)
+        self.statusBar().showMessage("Subtitle reverted to original", 3000)
+
     def deleteSubtitle(self):
         """Remove the currently selected subtitle from the XML."""
         global currentSubIndex
@@ -3834,6 +3935,7 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.setEnabled(False)
         self.callDictButton.setEnabled(False)
         self.autoTranslateButton.setEnabled(False)
+        self.revertSubButton.setEnabled(False)
 
     # ── Audio ─────────────────────────────────────────────────────────────────
 
@@ -4206,6 +4308,29 @@ class MainWindow(QMainWindow):
             print(f"Warning: ZMovie subtitle extraction failed: {e}")
             zmovieOriginalJson = {}
         zmovieAlteredJson = {}  # fresh load, no edits yet
+
+    def exportRadioJson(self):
+        """Save radioAlteredJson (only changed entries) to a JSON file."""
+        if not radioAlteredJson:
+            QMessageBox.warning(self, "No changes", "No RADIO entries have been modified.")
+            return
+        radioPath = projectSettings.get("radio_dat_path", "")
+        stem = os.path.splitext(os.path.basename(radioPath))[0].lower() if radioPath else "radio"
+        default = os.path.join(os.path.dirname(radioPath) if radioPath else "",
+                               f"{stem}-dialogue.json")
+        filename = QFileDialog.getSaveFileName(
+            self, "Export RADIO JSON (altered only)", default, "JSON Files (*.json)"
+        )[0]
+        if not filename:
+            return
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(radioAlteredJson, f, ensure_ascii=False, indent=2)
+            self._modified = False
+            self.statusBar().showMessage(
+                f"RADIO JSON exported ({len(radioAlteredJson)} altered calls): {filename}", 5000)
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def exportZmovieJson(self):
         """Save zmovieAlteredJson (only changed entries) to a JSON file."""
