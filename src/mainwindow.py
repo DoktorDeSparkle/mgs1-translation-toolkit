@@ -2491,6 +2491,31 @@ class MainWindow(QMainWindow):
         self.actionExportZmovieJson.triggered.connect(self.exportZmovieJson)
         exportMenu.addAction(self.actionExportZmovieJson)
 
+        # ── Import menu ─────────────────────────────────────────────────────
+        # Loads altered-only JSON back into memory (e.g. produced by Export
+        # or the CLI), overwriting any existing in-memory alterations.
+        importMenu = self.menuBar().addMenu("Import")
+
+        self.actionImportRadioJson = QAction("Radio JSON...", self)
+        self.actionImportRadioJson.setStatusTip("Import altered RADIO subtitles from JSON")
+        self.actionImportRadioJson.triggered.connect(self.importRadioJson)
+        importMenu.addAction(self.actionImportRadioJson)
+
+        self.actionImportDemoJson = QAction("Demo JSON...", self)
+        self.actionImportDemoJson.setStatusTip("Import altered DEMO subtitles from JSON")
+        self.actionImportDemoJson.triggered.connect(self.importDemoJson)
+        importMenu.addAction(self.actionImportDemoJson)
+
+        self.actionImportVoxJson = QAction("VOX JSON...", self)
+        self.actionImportVoxJson.setStatusTip("Import altered VOX subtitles from JSON")
+        self.actionImportVoxJson.triggered.connect(self.importVoxJson)
+        importMenu.addAction(self.actionImportVoxJson)
+
+        self.actionImportZmovieJson = QAction("ZMovie JSON...", self)
+        self.actionImportZmovieJson.setStatusTip("Import altered ZMOVIE subtitles from JSON")
+        self.actionImportZmovieJson.triggered.connect(self.importZmovieJson)
+        importMenu.addAction(self.actionImportZmovieJson)
+
         # ── Mode tab bar ───────────────────────────────────────────────────────
         from PySide6.QtWidgets import QToolBar, QTabBar
         self._modeToolBar = QToolBar("Editor Mode", self)
@@ -4308,6 +4333,112 @@ class MainWindow(QMainWindow):
             print(f"Warning: ZMovie subtitle extraction failed: {e}")
             zmovieOriginalJson = {}
         zmovieAlteredJson = {}  # fresh load, no edits yet
+
+    # ── Import (altered-only JSON) ───────────────────────────────────────
+
+    def _confirmImportOverwrite(self, label: str) -> bool:
+        """Confirm before clobbering existing in-memory alterations on import."""
+        reply = QMessageBox.warning(
+            self, f"Replace {label} alterations?",
+            f"You have unsaved {label} edits in memory.\n"
+            "Importing will replace them with the file contents.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        return reply == QMessageBox.Yes
+
+    def _loadJsonForImport(self, label: str):
+        """File-dialog + load + parse. Returns the loaded dict, or None on cancel/error."""
+        filename = QFileDialog.getOpenFileName(
+            self, f"Import {label} JSON", "", "JSON Files (*.json)"
+        )[0]
+        if not filename:
+            return None, None
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", str(e))
+            return None, None
+        if not isinstance(data, dict):
+            QMessageBox.critical(
+                self, "Import Error",
+                "Expected a JSON object at the top level."
+            )
+            return None, None
+        return data, filename
+
+    def importRadioJson(self):
+        """Replace radioAlteredJson with the contents of a JSON file."""
+        global radioAlteredJson
+        if radioAlteredJson and not self._confirmImportOverwrite("RADIO"):
+            return
+        data, filename = self._loadJsonForImport("RADIO")
+        if data is None:
+            return
+        radioAlteredJson = data
+        self._modified = True
+        if self._editorMode == "radio":
+            self._populateRadioOffsets()
+            callOff = (
+                radioManager.workingCall.get("offset")
+                if radioManager.workingCall is not None else None
+            )
+            self.revertVoxButton.setVisible(bool(callOff) and callOff in radioAlteredJson)
+            self._refreshSubsList()
+        self.statusBar().showMessage(
+            f"RADIO JSON imported ({len(radioAlteredJson)} altered calls): {filename}", 5000)
+
+    def importDemoJson(self):
+        """Replace demoAlteredJson with the contents of a JSON file."""
+        global demoAlteredJson
+        if demoAlteredJson and not self._confirmImportOverwrite("DEMO"):
+            return
+        data, filename = self._loadJsonForImport("DEMO")
+        if data is None:
+            return
+        demoAlteredJson = _ensureJsonV2(data)
+        self._modified = True
+        if self._editorMode == "demo":
+            self._populateDemoOffsets()
+            self.revertVoxButton.setVisible(currentDemoKey in demoAlteredJson)
+            self._refreshSubsList()
+        self.statusBar().showMessage(
+            f"DEMO JSON imported ({len(demoAlteredJson)} altered entries): {filename}", 5000)
+
+    def importVoxJson(self):
+        """Replace voxAlteredJson with the contents of a JSON file."""
+        global voxAlteredJson
+        if voxAlteredJson and not self._confirmImportOverwrite("VOX"):
+            return
+        data, filename = self._loadJsonForImport("VOX")
+        if data is None:
+            return
+        voxAlteredJson = _ensureJsonV2(data)
+        self._modified = True
+        if self._editorMode == "vox":
+            self._populateVoxOffsets()
+            self.revertVoxButton.setVisible(currentVoxKey in voxAlteredJson)
+            self._refreshSubsList()
+        self.statusBar().showMessage(
+            f"VOX JSON imported ({len(voxAlteredJson)} altered entries): {filename}", 5000)
+
+    def importZmovieJson(self):
+        """Replace zmovieAlteredJson with the contents of a JSON file."""
+        global zmovieAlteredJson
+        if zmovieAlteredJson and not self._confirmImportOverwrite("ZMOVIE"):
+            return
+        data, filename = self._loadJsonForImport("ZMOVIE")
+        if data is None:
+            return
+        zmovieAlteredJson = _ensureJsonV2(data)
+        self._modified = True
+        if self._editorMode == "zmovie":
+            self._populateZmovieOffsets()
+            self.revertVoxButton.setVisible(currentZmovieKey in zmovieAlteredJson)
+            self._refreshSubsList()
+        self.statusBar().showMessage(
+            f"ZMOVIE JSON imported ({len(zmovieAlteredJson)} altered entries): {filename}", 5000)
 
     def exportRadioJson(self):
         """Save radioAlteredJson (only changed entries) to a JSON file."""

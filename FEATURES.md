@@ -34,7 +34,7 @@
 - Extract subtitle timing/text from DEMO.DAT, VOX.DAT, or ZMOVIE.STR without pre-splitting
 - Edit start frame, duration, and text per subtitle entry
 - Apply edits via copy-on-write: first edit to an entry copies it from original into altered, then mutates the altered copy
-- Export dialogue to JSON file — exports only altered entries (Demo, VOX, ZMovie)
+- **Export / Import altered JSON** — top-level Export and Import menus with one action per DAT (Radio, Demo, VOX, ZMovie). Exports write only altered entries; imports replace the in-memory altered dict (with a confirmation prompt if there are existing unsaved edits) and refresh the UI immediately when the current mode matches. Round-trips the same JSON shape used inside `.mtp` projects, so edits can move freely between the GUI and the CLI tools in `scripts/`.
 - Compile rebuilds entry by entry with 0x800 block alignment; entries can grow freely with offsets auto-adjusted
 - ZMovie: patch-in-place compile back to ZMOVIE.STR via extractZmovie; raises clear error on subtitle overflow
 - **Offsets JSON** — VOX and DEMO extraction builds an offsets.json mapping entry numbers to hex byte offsets for STAGE.DIR adjustment; saved in the .mtp project file
