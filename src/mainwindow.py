@@ -2230,10 +2230,18 @@ class MainWindow(QMainWindow):
         self.autoTranslateButton = QPushButton("Auto-translate")
         self.autoTranslateButton.setToolTip(
             "Translate, auto-format, and apply all subtitles\n"
-            "in the current entry using Preferences language settings")
+            "in the current entry using Preferences language settings (Cmd+Shift+T)")
         self.autoTranslateButton.setEnabled(False)
+        self.autoTranslateButton.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_T))
         self.autoTranslateButton.clicked.connect(self._autoTranslateAll)
         rightCol.addWidget(self.autoTranslateButton)
+        self.translateAllButton = QPushButton("Translate All ▼")
+        self.translateAllButton.setToolTip(
+            "Auto-translate every entry from the current one to the end.\n"
+            "Project is saved every 10 entries. Stops on error.")
+        self.translateAllButton.setEnabled(False)
+        self.translateAllButton.clicked.connect(self._toggleTranslateAll)
+        rightCol.addWidget(self.translateAllButton)
         self.revertVoxButton = QPushButton("Revert Entry")
         self.revertVoxButton.setToolTip(
             "Discard all changes to this entry and restore the original")
@@ -3221,6 +3229,7 @@ class MainWindow(QMainWindow):
         self.deleteSubButton.setEnabled(self._editorMode == "radio")
         self.callDictButton.setEnabled(self._editorMode in ("radio", "demo", "vox"))
         self.autoTranslateButton.setEnabled(True)
+        self.translateAllButton.setEnabled(True)
         self.revertSubButton.setEnabled(True)
 
     # ── VOX timing helpers ────────────────────────────────────────────────────
@@ -3484,7 +3493,12 @@ class MainWindow(QMainWindow):
         self._atProgress.setWindowTitle("Auto-translate")
         self._atProgress.setMinimumDuration(0)
         self._atProgress.setValue(0)
-        self._atProgress.setWindowModality(Qt.WindowModal)
+        if getattr(self, '_translateAllRunning', False):
+            self._atProgress.setWindowModality(Qt.NonModal)
+        else:
+            self._atProgress.setWindowModality(Qt.WindowModal)
+        self._atErrored = False
+        self._atCanceled = False
 
         # Store results as they arrive; apply all when thread finishes
         self._atResults: list[str] = [""] * len(texts)
@@ -3505,19 +3519,26 @@ class MainWindow(QMainWindow):
             f"Translating subtitle {idx + 1} of {self._atTotal}...")
 
     def _onAutoTranslateError(self, msg: str):
+        self._atErrored = True
         self._atProgress.close()
+        if getattr(self, '_translateAllRunning', False):
+            self._translateAllFinish(f"Translate All stopped: {msg}")
         QMessageBox.warning(self, "Auto-translate Error", msg)
 
     def _onAutoTranslateCancel(self):
+        self._atCanceled = True
         if hasattr(self, '_atThread') and self._atThread.isRunning():
             self._atThread.requestInterruption()
             self._atThread.wait()
 
     def _onAutoTranslateDone(self):
         """All translations received — auto-format and apply each one."""
-        if not hasattr(self, '_atProgress') or not self._atProgress.isVisible():
-            return  # was cancelled
-        self._atProgress.close()
+        if getattr(self, '_atCanceled', False) or getattr(self, '_atErrored', False):
+            if getattr(self, '_translateAllRunning', False):
+                self._translateAllFinish("Translate All canceled")
+            return
+        if hasattr(self, '_atProgress'):
+            self._atProgress.close()
 
         from scripts.translation.mgs_font_text import wrap_text
 
@@ -3546,6 +3567,104 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage(
             f"Auto-translated {len(self._atResults)} subtitle(s)", 5000)
+
+        # If a Translate All loop is active, chain to the next entry directly.
+        if getattr(self, '_translateAllRunning', False):
+            QTimer.singleShot(0, self._translateAllAdvance)
+
+    # ── Translate-All loop ────────────────────────────────────────────────────
+
+    def _toggleTranslateAll(self):
+        """Start the bulk-translate loop, or abort it if already running."""
+        if getattr(self, '_translateAllRunning', False):
+            self._translateAllRunning = False
+            self.statusBar().showMessage("Translate All: aborting after current entry...", 3000)
+            return
+        total = self.ui.offsetListBox.count()
+        start = self.ui.offsetListBox.currentIndex()
+        remaining = total - start
+        if remaining <= 0:
+            return
+        if not projectFilePath:
+            reply = QMessageBox.question(
+                self, "Save Project First",
+                "Translate All saves the project every 10 entries, but no "
+                "project file is open yet.\n\nSave the project now?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if reply != QMessageBox.Yes:
+                return
+            self.saveProjectAs()
+            if not projectFilePath:
+                return  # user canceled Save As
+        reply = QMessageBox.question(
+            self, "Translate All",
+            f"Auto-translate {remaining} entries starting from the current one?\n\n"
+            f"Project will be saved every 10 entries.\n"
+            f"The loop will stop if any entry errors.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if reply != QMessageBox.Yes:
+            return
+        self._translateAllRunning = True
+        self._translateAllCounter = 0
+        self.translateAllButton.setText("Abort Translate All")
+        self._setTranslateAllLockout(True)
+        self._translateAllStep()
+
+    def _setTranslateAllLockout(self, locked: bool):
+        """Disable controls that would conflict with the in-progress loop.
+        translateAllButton stays enabled so it can act as Abort."""
+        enabled = not locked
+        self.autoTranslateButton.setEnabled(enabled)
+        self.ui.offsetListBox.setEnabled(enabled)
+        self.btnPrevEntry.setEnabled(enabled)
+        self.btnNextEntry.setEnabled(enabled)
+        self.applyEditButton.setEnabled(enabled)
+        self.splitSubButton.setEnabled(enabled)
+        if hasattr(self, 'deleteSubButton'):
+            self.deleteSubButton.setEnabled(enabled and self._editorMode == "radio")
+        self.translateButton.setEnabled(enabled)
+        self.autoFormatButton.setEnabled(enabled)
+        self.revertSubButton.setEnabled(enabled)
+
+    def _translateAllStep(self):
+        """Translate the currently-selected entry. Continuation runs from _onAutoTranslateDone."""
+        if not self._translateAllRunning:
+            self._translateAllFinish("Translate All aborted")
+            return
+        if self.ui.subsPreviewList.count() == 0:
+            QTimer.singleShot(0, self._translateAllAdvance)
+            return
+        self._autoTranslateAll()
+        # Fallback: _autoTranslateAll early-returns when texts are empty, so no
+        # thread/finished fires. Detect that and advance ourselves.
+        if not hasattr(self, '_atThread') or self._atThread is None \
+                or not self._atThread.isRunning():
+            QTimer.singleShot(0, self._translateAllAdvance)
+
+    def _translateAllAdvance(self):
+        """Save (every 10), advance to the next entry, kick off another step."""
+        if not self._translateAllRunning:
+            self._translateAllFinish("Translate All aborted")
+            return
+        self._translateAllCounter += 1
+        if self._translateAllCounter % 10 == 0 and projectFilePath:
+            self.saveProject()
+        current = self.ui.offsetListBox.currentIndex()
+        last = self.ui.offsetListBox.count() - 1
+        if current >= last:
+            if projectFilePath and self._translateAllCounter % 10 != 0:
+                self.saveProject()
+            self._translateAllFinish(
+                f"Translate All complete: {self._translateAllCounter} entries")
+            return
+        self.ui.offsetListBox.setCurrentIndex(current + 1)
+        QTimer.singleShot(50, self._translateAllStep)
+
+    def _translateAllFinish(self, msg: str):
+        self._translateAllRunning = False
+        self.translateAllButton.setText("Translate All ▼")
+        self._setTranslateAllLockout(False)
+        self.statusBar().showMessage(msg, 5000)
 
     _SPLIT_GAP_FRAMES = 2  # frames between the two halves
 
@@ -3960,6 +4079,8 @@ class MainWindow(QMainWindow):
         self.autoFormatButton.setEnabled(False)
         self.callDictButton.setEnabled(False)
         self.autoTranslateButton.setEnabled(False)
+        if not getattr(self, '_translateAllRunning', False):
+            self.translateAllButton.setEnabled(False)
         self.revertSubButton.setEnabled(False)
 
     # ── Audio ─────────────────────────────────────────────────────────────────
@@ -5307,6 +5428,7 @@ class MainWindow(QMainWindow):
         self.actionDemoMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
+        self.ui.labelCallOffset.setText("Demo (Offset)")
         self.ui.playVoxButton.setEnabled(bool(demoOriginalJson) or bool(demoAlteredJson))
         self.exportPlayZmovieButton.setEnabled(False)
         self._populateDemoOffsets()
@@ -5335,6 +5457,7 @@ class MainWindow(QMainWindow):
         self.actionZmovieMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
+        self.ui.labelCallOffset.setText("ZMovie (Offset)")
         self.ui.playVoxButton.setEnabled(bool(zmovieOriginalData))
         self.exportPlayZmovieButton.setEnabled(bool(zmovieOriginalData))
         self._populateZmovieOffsets()
@@ -5363,6 +5486,7 @@ class MainWindow(QMainWindow):
         self.actionVoxMode.setChecked(True)
         self._syncTab()
         self._hideRadioWidgets()
+        self.ui.labelCallOffset.setText("Vox (Offset)")
         self.ui.playVoxButton.setEnabled(bool(voxOriginalJson) or bool(voxAlteredJson))
         self.exportPlayZmovieButton.setEnabled(False)
         self.chkUnclaimedVox.setVisible(bool(_radioClaimedVoxAddrs))
@@ -5378,6 +5502,7 @@ class MainWindow(QMainWindow):
         self._editorMode = "radio"
         self.actionRadioMode.setChecked(True)
         self._syncTab()
+        self.ui.labelCallOffset.setText("Call (Offset)")
         # Restore radio-specific widgets
         self.ui.audioCueListView.setVisible(not self.chkSkipVoxSort.isChecked())
         self.ui.FreqLabel.setVisible(True)
